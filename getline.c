@@ -41,7 +41,6 @@
  */
 #define CONFIG_OPOST_HACK  1
 
-
 /*
  * Standard headers.
  */
@@ -2128,8 +2127,13 @@ static int gl_get_input_line(GetLine *gl, const char *start_line, int start_pos)
  * Has the line been completed?
  */
     if(gl->endline)
-      return gl_line_ended(gl, /* isprint((int)(unsigned char) c) ? c : '\n' */ c,
+#ifdef LIBTECLA_ACCEPT_NONPRINTING_LINE_END /* still map \r to \n */
+      return gl_line_ended(gl, '\r' != c ? c : '\n' ,
 			   gl->echo && (c=='\n' || c=='\r'));
+#else
+      return gl_line_ended(gl, isprint((int)(unsigned char) c) ? c : '\n' ,
+			   gl->echo && (c=='\n' || c=='\r'));
+#endif
   };
 /*
  * To get here, gl_read_character() must have returned non-zero. See
