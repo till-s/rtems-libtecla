@@ -1,0 +1,10 @@
+The libtecla contained in this directory differs from the
+original version:
+
+- RTEMS port (look for the #ifdef __rtems__ symbols)
+- On RTEMS, we always and exclusively use the reentrant library version
+- Shared libraries are disabled for host builds (to avoid LD_LIBRARY_PATH
+  problems for people building the CEXP demo)
+- Implemented a hack to either temporarily restore OPOST processing
+  while getline is blocking for input or to enable it permanently.
+  Otherwise we get no '\r's from other threads printing to the console.
