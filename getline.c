@@ -2128,7 +2128,7 @@ static int gl_get_input_line(GetLine *gl, const char *start_line, int start_pos)
  * Has the line been completed?
  */
     if(gl->endline)
-      return gl_line_ended(gl, isprint((int)(unsigned char) c) ? c : '\n',
+      return gl_line_ended(gl, /* isprint((int)(unsigned char) c) ? c : '\n' */ c,
 			   gl->echo && (c=='\n' || c=='\r'));
   };
 /*
