@@ -335,7 +335,7 @@ size_t _pu_pathname_dim(void)
  */
 #elif defined(_PC_PATH_MAX)
   errno = 0;
-  maxlen = pathconf(FS_ROOT_DIR, _PC_PATH_MAX);
+  maxlen = fpathconf(FS_ROOT_DIR, _PC_PATH_MAX);
   if(maxlen <= 0 || errno)
     maxlen = MAX_PATHLEN_FALLBACK;
 /*
