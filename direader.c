@@ -52,6 +52,10 @@
  */
 #if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
 #define USE_READDIR_R 1
+#ifdef __rtems__
+/* has no readdir_r but readdir should be safe */
+#undef USE_READDIR_R
+#endif
 #endif
 
 /*
