@@ -26,7 +26,7 @@ PROGS = demo$(SUFFIX) demo2$(SUFFIX) enhance$(SUFFIX)
 static: libtecla$(SUFFIX).a
 
 libtecla$(SUFFIX).a: $(LIB_OBJECTS)
-	ar -ru $@ $(LIB_OBJECTS); \
+	$(AR) -ru $@ $(LIB_OBJECTS); \
 	$(RANLIB) $@; \
 	rm -f $(PROGS)
 
