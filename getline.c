@@ -29,6 +29,19 @@
  * of the copyright holder.
  */
 
+
+/* re-enable OPOST so others may print to the RTEMS console
+ * T. Straumann, 2003/3/18
+ *
+ */
+/* OPOST_HACK values:
+ *  1 enable OPOST while waiting for input chars 
+ *  2 globally (always) enable OPOST
+ *  undefined: do not use any hack
+ */
+#define CONFIG_OPOST_HACK  1
+
+
 /*
  * Standard headers.
  */
@@ -43,10 +56,33 @@
 /*
  * UNIX headers.
  */
+#ifndef __rtems__
 #include <sys/ioctl.h>
+#endif
 #ifdef HAVE_SELECT
 #include <sys/time.h>
 #include <sys/types.h>
+#include  <sys/select.h>
+#endif
+
+#ifdef __rtems__
+#ifndef NSIG 
+#define NSIG 0
+#endif
+static int
+sigismember (const sigset_t * set, int signo)
+{
+		  if (signo >= NSIG || signo <= 0)
+				      {
+							        errno = EINVAL;
+									      return -1;
+										      }
+
+		    if (*set & (1 << (signo - 1)))
+					    return 1;
+			  else
+					      return 0;
+}
 #endif
 
 /*
@@ -110,13 +146,20 @@ static int gl_tputs_putchar(int c) {return putc(c, tputs_fp);}
  * POSIX headers.
  */
 #include <unistd.h>
+#ifdef __rtems__
+#include <rtems-hackdefs.h>
+#else
 #include <termios.h>
+#endif
 
 /*
  * Does the system provide the signal and ioctl query facility used
  * to inform the process of terminal window size changes?
  */
-#if defined(SIGWINCH) && defined(TIOCGWINSZ)
+#if (defined(SIGWINCH) || defined(__rtems__)) && defined(TIOCGWINSZ)
+#ifndef SIGWINCH
+#define SIGWINCH	28
+#endif
 #define USE_SIGWINCH 1
 #endif
 
@@ -424,11 +467,14 @@ static const struct GlDefSignal {
   GlAfterSignal after;  /* What to do after the signal has been delivered */
   int errno_value;      /* What to set errno to */
 } gl_signal_list[] = {
+#ifndef __rtems__
   {SIGABRT,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
   {SIGINT,    GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
   {SIGTERM,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
   {SIGALRM,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
+#ifdef SIGCONT
   {SIGCONT,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
+#endif
 #if defined(SIGHUP)
 #ifdef ENOTTY
   {SIGHUP,    GLS_SUSPEND_INPUT, GLS_ABORT, ENOTTY},
@@ -473,13 +519,16 @@ static const struct GlDefSignal {
 #ifdef SIGXCPU
   {SIGXCPU,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
+#endif
 };
 
 /*
  * Define file-scope variables for use in signal handlers.
  */
 static volatile sig_atomic_t gl_pending_signal = -1;
+#ifndef __rtems__
 static sigjmp_buf gl_setjmp_buffer;
+#endif
 
 static void gl_signal_handler(int signo);
 
@@ -1741,6 +1790,7 @@ char *gl_get_line(GetLine *gl, const char *prompt,
  */
 static int gl_override_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Set up our signal handler.
@@ -1800,6 +1850,7 @@ static int gl_override_signal_handlers(GetLine *gl)
  * SIGWINCH signal handler wasn't in place, check to see if the terminal
  * size needs updating.
  */
+#endif
 #ifdef USE_SIGWINCH
   if(gl_resize_terminal(gl, 0))
     return 1;
@@ -1818,6 +1869,7 @@ static int gl_override_signal_handlers(GetLine *gl)
  */
 static int gl_restore_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Restore application signal handlers that were overriden
@@ -1837,9 +1889,11 @@ static int gl_restore_signal_handlers(GetLine *gl)
     fprintf(stderr, "gl_get_line(): sigprocmask error: %s\n", strerror(errno));
     return 1;
   };
+#endif
   return 0;
 }
 
+#ifndef __rtems__
 /*.......................................................................
  * This signal handler simply records the fact that a given signal was
  * caught in the file-scope gl_pending_signal variable.
@@ -1849,6 +1903,7 @@ static void gl_signal_handler(int signo)
   gl_pending_signal = signo;
   siglongjmp(gl_setjmp_buffer, 1);
 }
+#endif
 
 /*.......................................................................
  * Switch the terminal into raw mode after storing the previous terminal
@@ -1894,10 +1949,14 @@ static int gl_raw_terminal_mode(GetLine *gl)
  */
   newattr.c_cflag &= ~(CSIZE | PARENB);
   newattr.c_cflag |= CS8;
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
 /*
  * Turn off output processing.
  */
   newattr.c_oflag &= ~(OPOST);
+#endif
 /*
  * Request one byte at a time, without waiting.
  */
@@ -2283,14 +2342,30 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  *                        as though the user had pressed return. In the
  *                        latter case gl->endline will be non-zero.
  */
+
 static int gl_read_character(GetLine *gl, char *c)
 {
+#if CONFIG_OPOST_HACK == 1
+Termios attr;
+volatile Termios *pa = 0;
+#endif
+int rval = 1;
 /*
  * Before waiting for a new character to be input, flush unwritten
  * characters to the terminal.
  */
   if(gl_flush_output(gl))
-    return 1;
+    goto cleanup;
+
+#if CONFIG_OPOST_HACK == 1
+  if (0==tcgetattr(gl->input_fd, &attr)) {
+    attr.c_oflag |= OPOST;
+    tcsetattr(gl->input_fd, TCSADRAIN, &attr);
+    attr.c_oflag &= ~OPOST;
+    pa = &attr;
+  }
+#endif
+
 /*
  * We may have to repeat the read if window change signals are received.
  */
@@ -2299,18 +2374,25 @@ static int gl_read_character(GetLine *gl, char *c)
  * If the endline flag becomes set, don't wait for another character.
  */
     if(gl->endline)
-      return 1;
+      goto cleanup;
 /*
  * Since the code in this function can block, trap signals.
  */
-    if(sigsetjmp(gl_setjmp_buffer, 1)==0) {
+#ifndef __rtems__
+    if(sigsetjmp(gl_setjmp_buffer, 1)==0)
+#endif
+	{
 /*
  * Unblock the signals that we are trapping.
  */
+#ifndef __rtems__
       if(sigprocmask(SIG_UNBLOCK, &gl->new_signal_set, NULL) == -1) {
 	fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
-	return 1;
+	goto cleanup;
       };
+#endif
+
+
 /*
  * If select() is available, watch for activity on any file descriptors
  * that the user has registered, and for data available on the terminal
@@ -2318,8 +2400,9 @@ static int gl_read_character(GetLine *gl, char *c)
  */
 #ifdef HAVE_SELECT
       if(gl_event_handler(gl))
-	return 1;
+	goto cleanup;
 #endif
+
 /*
  * Read one character from the terminal. This could take more
  * than one call if an interrupt that we aren't trapping is
@@ -2327,21 +2410,38 @@ static int gl_read_character(GetLine *gl, char *c)
  */
       while(read(gl->input_fd, (void *)c, 1) != 1) {
 	if(errno != EINTR) {
+#ifdef __rtems__
+#ifdef DEBUG
+		printk("read failed; errno %i\n",errno);
+#endif
+		errno=EIO;
+#endif
 #ifdef EAGAIN
 	  if(!errno)          /* This can happen with SysV O_NDELAY */
 	    errno = EAGAIN;
 #endif
-	  return 1;
+	  goto cleanup;
 	};
       };
+#ifndef __rtems__
 /*
  * Block all of the signals that we are trapping.
  */
       if(sigprocmask(SIG_BLOCK, &gl->new_signal_set, NULL) == -1) {
 	fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
-	return 1;
+	goto cleanup;
       };
-      return 0;
+#else
+#if 0
+	if (4==*c) {
+		printk("C IS FOUR\n");
+		goto cleanup;
+	}
+#endif
+#endif
+
+      rval = 0;
+      goto cleanup;
     };
 /*
  * To get here, one of the signals that we are trapping must have
@@ -2351,8 +2451,16 @@ static int gl_read_character(GetLine *gl, char *c)
  * be received until we explicitly unblock them again.
  */
     if(gl_check_caught_signal(gl))
-      return 1;
+      goto cleanup;
   };
+
+cleanup:
+#if CONFIG_OPOST_HACK == 1
+  if (pa)
+    tcsetattr(gl->input_fd, TCSADRAIN, pa);
+#endif
+
+  return rval;
 }
 
 /*.......................................................................
@@ -2406,6 +2514,7 @@ static int gl_check_caught_signal(GetLine *gl)
  */
   if(sig->flags & GLS_RESTORE_TTY)
     gl_restore_terminal_attributes(gl);
+#ifndef __rtems__
 /*
  * Restore signal handlers to how they were before gl_get_line() was
  * called? If this hasn't been requested, only reinstate the signal
@@ -2460,6 +2569,7 @@ static int gl_check_caught_signal(GetLine *gl)
     return 0;
     break;
   };
+#endif
   return 0;
 }
 
@@ -2613,10 +2723,6 @@ static int gl_control_strings(GetLine *gl, const char *term)
     gl->blink = GL_ESC_STR "[5m";
   if(!gl->text_attr_off)
     gl->text_attr_off = GL_ESC_STR "[m";
-/*
- * Find out the current terminal size.
- */
-  (void) gl_terminal_size(gl, GL_DEF_NCOLUMN, GL_DEF_NLINE);
   return 0;
 }
 
@@ -2696,7 +2802,9 @@ static KT_KEY_FN(gl_abort)
  */
 static KT_KEY_FN(gl_suspend)
 {
+#ifdef SIGTSTP
   raise(SIGTSTP);
+#endif
   return 0;
 }
 
@@ -4835,6 +4943,10 @@ int gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
  * We now have enough info to interact with the terminal.
  */
     gl->is_term = 1;
+/*
+ * Find out the current terminal size.
+ */
+  (void) gl_terminal_size(gl, GL_DEF_NCOLUMN, GL_DEF_NLINE);
 /*
  * Bind terminal-specific keys.
  */
@@ -7488,10 +7600,12 @@ static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
  * might be modifying global or heap data, so block all the signals
  * that we are trapping.
  */
+#ifndef __rtems__
   if(sigprocmask(SIG_BLOCK, &gl->new_signal_set, NULL) == -1) {
     fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
     return 1;
   };
+#endif
 /*
  * Re-enable conversion of newline characters to carriage-return/linefeed,
  * so that the callback can write to the terminal without having to do
@@ -7527,6 +7641,9 @@ static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
 /*
  * Disable conversion of newline characters to carriage-return/linefeed.
  */
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
   attr.c_oflag &= ~(OPOST);
   while(tcsetattr(gl->input_fd, TCSADRAIN, &attr)) {
     if(errno != EINTR) {
@@ -7534,6 +7651,7 @@ static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
       return 1;
     };
   };
+#endif
 /*
  * If requested, redisplay the input line.
  */
@@ -8184,6 +8302,7 @@ void gl_prompt_style(GetLine *gl, GlPromptStyle style)
 int gl_trap_signal(GetLine *gl, int signo, unsigned flags,
 		   GlAfterSignal after, int errno_value)
 {
+#ifndef __rtems__
   GlSignalNode *sig;
 /*
  * Check the arguments.
@@ -8231,6 +8350,7 @@ int gl_trap_signal(GetLine *gl, int signo, unsigned flags,
   sig->flags = flags;
   sig->after = after;
   sig->errno_value = errno_value;
+#endif
   return 0;
 }
 
