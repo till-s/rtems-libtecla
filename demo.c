@@ -41,7 +41,11 @@
 
 #include "libtecla.h"
 
-int main(int argc, char *argv[])
+#ifdef __rtems__
+#define main tecla_main
+#endif
+
+int tecla_main(int argc, char *argv[])
 {
   char *line;             /* A line of input */
   GetLine *gl;            /* The line editor */
