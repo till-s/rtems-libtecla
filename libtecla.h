@@ -52,6 +52,13 @@ extern "C" {
 #define TECLA_MINOR_VER 4
 #define TECLA_MICRO_VER 1
 
+/* this version of libtecla has been modified to pass nonprinting
+ * characters terminating a line (i.e. mapped to the 'newline' action)
+ * along to the user instead of mapping them to '\n').
+ * This is nice, because the user might take different action
+ * depending on what key caused the line to be accepted.
+ */
+#define LIBTECLA_ACCEPT_NONPRINTING_LINE_END
 /*.......................................................................
  * Query the version number of the tecla library.
  *
