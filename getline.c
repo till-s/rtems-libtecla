@@ -7833,10 +7833,13 @@ GlTerminalSize gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline)
  * If we still haven't been able to acquire reasonable values, substitute
  * the default values specified by the caller.
  */
-  if(gl->nline <= 0)
+  if(gl->nline <= 1)
     gl->nline = def_nline;
-  if(gl->ncolumn <= 0)
-    gl->ncolumn = def_ncolumn;
+  /* MUST NOT set ncolumn to 1 or gl_output_char() might
+   * go into infinite recursion!
+   */
+  if(gl->ncolumn <= 1)
+    gl->ncolumn = def_ncolumn > 1 ? def_ncolumn : GL_DEF_NCOLUMN;
 /*
  * Copy the new size into the return value.
  */
