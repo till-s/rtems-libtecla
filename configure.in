@@ -186,7 +186,11 @@ dnl available, default to only compiling the non-reentrant version of
 dnl the library.
 
 if test $tecla_cv_reentrant = no; then
+if test $host_os = rtems; then
+  TARGETS="reentrant"
+else
   TARGETS="normal"
+fi
 fi
 
 dnl Check for the select system call with the normal arguments,
@@ -317,7 +321,11 @@ dnl names. Beware that autoconf uses [] as quote characters, so if you
 dnl want to use a regexp character range like [a-z], you should write
 dnl this as [[a-z]].
 
-case $target in
+dnl T. Straumann; don't build shared libs for the cexp demo program
+dnl               so they don't have problems with the shared library
+dnl               path
+dnl case $target in
+case "ts_dont_build_shared_libs_for_cexp_demo" in
 *solaris*)
   AC_DEFINE(__EXTENSIONS__)
   SHARED_EXT=".so.${MAJOR_VER}"
