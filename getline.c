@@ -68,19 +68,20 @@
 #ifndef NSIG 
 #define NSIG 0
 #endif
+#define sigismember(a,b) my_sigismember(a,b)
 static int
-sigismember (const sigset_t * set, int signo)
+my_sigismember (const sigset_t * set, int signo)
 {
-		  if (signo >= NSIG || signo <= 0)
-				      {
-							        errno = EINVAL;
-									      return -1;
-										      }
+		if (signo >= NSIG || signo <= 0)
+		{
+				errno = EINVAL;
+				return -1;
+		}
 
-		    if (*set & (1 << (signo - 1)))
-					    return 1;
-			  else
-					      return 0;
+		if (*set & (1 << (signo - 1)))
+				return 1;
+		else
+				return 0;
 }
 #endif
 
