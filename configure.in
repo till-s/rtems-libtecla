@@ -9,6 +9,13 @@ dnl contains the libtecla source code.
 
 AC_INIT(getline.c)
 
+dnl The following directive tells autoconf to figure out the target
+dnl system type and assign a canonical name for this to the $target
+dnl shell variable. This is used below in the target-specific case
+dnl statement.
+
+AC_CANONICAL_SYSTEM
+
 dnl Here we set the major version number of the tecla library.
 dnl Incrementing this number implies that a change has been made to
 dnl the library's public interface, which makes it binary incompatible
@@ -80,13 +87,7 @@ dnl is set to ranlib. Otherwise it is set to :, which is the do-nothing
 dnl command of the bourne shell.
 
 AC_PROG_RANLIB
-
-dnl The following directive tells autoconf to figure out the target
-dnl system type and assign a canonical name for this to the $target
-dnl shell variable. This is used below in the target-specific case
-dnl statement.
-
-AC_CANONICAL_SYSTEM
+AC_CHECK_TOOL(AR,ar)
 
 dnl In early versions of Solaris, some libraries are in /usr/ccs/lib,
 dnl where gcc doesn't look. The tests below for the curses library
