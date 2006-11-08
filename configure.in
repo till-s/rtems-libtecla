@@ -113,6 +113,10 @@ dnl USE_TERMINFO or USE_TERMCAP is arranged to be defined in CFLAGS,
 dnl via the exported DEFINES shell variable, and the library in which
 dnl they were found is appended to the LIBS shell variable.
 
+dnl termcap/terminfo is not reentrant [thanks to Eric Norum for
+dnl pointing this out].
+
+if test $host_os != rtems; then
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
@@ -124,6 +128,7 @@ AC_CHECK_LIB(curses, tigetstr, [
   LIBS="$LIBS -lcurses"
   AC_CHECK_HEADER(termcap.h, AC_DEFINE(HAVE_TERMCAP_H))
 ])])])
+fi
 
 dnl Some systems don't have term.h, some systems squirrel it away
 dnl in an ncurses sub-directory of the system include directory.
@@ -134,15 +139,19 @@ dnl sub-directory, arrange for HAVE_NCURSES_TERM_H to be set instead.
 dnl If it isn't found in either of these places, neither of these
 dnl variables is set, so term.h just doesn't get included.
 
+if test $host_os != rtems; then
 AC_CHECK_HEADER(term.h, AC_DEFINE(HAVE_TERM_H), [
   AC_CHECK_HEADER(ncurses/term.h, AC_DEFINE(HAVE_NCURSES_TERM_H))
 ])
+fi 
 
 dnl Do the same search for curses.h.
 
+if test $host_os != rtems; then
 AC_CHECK_HEADER(curses.h, AC_DEFINE(HAVE_CURSES_H), [
   AC_CHECK_HEADER(ncurses/curses.h, AC_DEFINE(HAVE_NCURSES_CURSES_H))
 ])
+fi
 
 dnl The following variable lists the targets that will be created if
 dnl the user runs make without any arguments. Initially we assume
