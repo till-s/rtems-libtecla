@@ -9,6 +9,13 @@ dnl contains the libtecla source code.
 
 AC_INIT(getline.c)
 
+dnl The following directive tells autoconf to figure out the target
+dnl system type and assign a canonical name for this to the $target
+dnl shell variable. This is used below in the target-specific case
+dnl statement.
+
+AC_CANONICAL_SYSTEM
+
 dnl Here we set the major version number of the tecla library.
 dnl Incrementing this number implies that a change has been made to
 dnl the library's public interface, which makes it binary incompatible
@@ -80,13 +87,7 @@ dnl is set to ranlib. Otherwise it is set to :, which is the do-nothing
 dnl command of the bourne shell.
 
 AC_PROG_RANLIB
-
-dnl The following directive tells autoconf to figure out the target
-dnl system type and assign a canonical name for this to the $target
-dnl shell variable. This is used below in the target-specific case
-dnl statement.
-
-AC_CANONICAL_SYSTEM
+AC_CHECK_TOOL(AR,ar)
 
 dnl In early versions of Solaris, some libraries are in /usr/ccs/lib,
 dnl where gcc doesn't look. The tests below for the curses library
@@ -112,6 +113,10 @@ dnl USE_TERMINFO or USE_TERMCAP is arranged to be defined in CFLAGS,
 dnl via the exported DEFINES shell variable, and the library in which
 dnl they were found is appended to the LIBS shell variable.
 
+dnl termcap/terminfo is not reentrant [thanks to Eric Norum for
+dnl pointing this out].
+
+if test $host_os != rtems; then
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
@@ -123,6 +128,7 @@ AC_CHECK_LIB(curses, tigetstr, [
   LIBS="$LIBS -lcurses"
   AC_CHECK_HEADER(termcap.h, AC_DEFINE(HAVE_TERMCAP_H))
 ])])])
+fi
 
 dnl Some systems don't have term.h, some systems squirrel it away
 dnl in an ncurses sub-directory of the system include directory.
@@ -133,15 +139,19 @@ dnl sub-directory, arrange for HAVE_NCURSES_TERM_H to be set instead.
 dnl If it isn't found in either of these places, neither of these
 dnl variables is set, so term.h just doesn't get included.
 
+if test $host_os != rtems; then
 AC_CHECK_HEADER(term.h, AC_DEFINE(HAVE_TERM_H), [
   AC_CHECK_HEADER(ncurses/term.h, AC_DEFINE(HAVE_NCURSES_TERM_H))
 ])
+fi 
 
 dnl Do the same search for curses.h.
 
+if test $host_os != rtems; then
 AC_CHECK_HEADER(curses.h, AC_DEFINE(HAVE_CURSES_H), [
   AC_CHECK_HEADER(ncurses/curses.h, AC_DEFINE(HAVE_NCURSES_CURSES_H))
 ])
+fi
 
 dnl The following variable lists the targets that will be created if
 dnl the user runs make without any arguments. Initially we assume
@@ -186,7 +196,11 @@ dnl available, default to only compiling the non-reentrant version of
 dnl the library.
 
 if test $tecla_cv_reentrant = no; then
+if test $host_os = rtems; then
+  TARGETS="reentrant"
+else
   TARGETS="normal"
+fi
 fi
 
 dnl Check for the select system call with the normal arguments,
@@ -317,7 +331,11 @@ dnl names. Beware that autoconf uses [] as quote characters, so if you
 dnl want to use a regexp character range like [a-z], you should write
 dnl this as [[a-z]].
 
-case $target in
+dnl T. Straumann; don't build shared libs for the cexp demo program
+dnl               so they don't have problems with the shared library
+dnl               path
+dnl case $target in
+case "ts_dont_build_shared_libs_for_cexp_demo" in
 *solaris*)
   AC_DEFINE(__EXTENSIONS__)
   SHARED_EXT=".so.${MAJOR_VER}"
