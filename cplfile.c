@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -30,6 +30,12 @@
  */
 
 /*
+ * If file-system access is to be excluded, this module has no function,
+ * so all of its code should be excluded.
+ */
+#ifndef WITHOUT_FILE_SYSTEM
+
+/*
  * Standard includes.
  */
 #include <stdio.h>
@@ -47,6 +53,7 @@
 #include "homedir.h"
 #include "pathutil.h"
 #include "cplfile.h"
+#include "errmsg.h"
 
 /*
  * Set the maximum length allowed for usernames.
@@ -60,18 +67,11 @@
 #define ENV_LEN 100
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so you don't decrease it below this number.
- */
-#define ERRLEN 200
-
-/*
  * The resources needed to complete a filename are maintained in objects
  * of the following type.
  */
 struct CompleteFile {
+  ErrMsg *err;                 /* The error reporting buffer */
   DirReader *dr;               /* A directory reader */
   HomeDir *home;               /* A home directory expander */
   PathName *path;              /* The buffer in which to accumulate the path */
@@ -80,7 +80,6 @@ struct CompleteFile {
                                /*  users. */
   char envnam[ENV_LEN+1];      /* The buffer used when reading the names of */
                                /*  environment variables. */
-  char errmsg[ERRLEN+1];       /* The error-report buffer */
 };
 
 static int cf_expand_home_dir(CompleteFile *cf, const char *user);
@@ -105,7 +104,7 @@ static int cf_prepare_suffix(CompleteFile *cf, const char *suffix,
 typedef struct {
   CompleteFile *cf;    /* The file-completion resource object */
   WordCompletion *cpl; /* The string-completion rsource object */
-  const char *prefix;  /* The username prefix to be completed */
+  size_t prefix_len;   /* The length of the prefix being completed */
   const char *line;    /* The line from which the prefix was extracted */
   int word_start;      /* The index in line[] of the start of the username */
   int word_end;        /* The index in line[] following the end of the prefix */
@@ -126,7 +125,7 @@ CompleteFile *_new_CompleteFile(void)
  */
   cf = (CompleteFile *) malloc(sizeof(CompleteFile));
   if(!cf) {
-    fprintf(stderr, "_new_CompleteFile: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -134,13 +133,19 @@ CompleteFile *_new_CompleteFile(void)
  * container at least up to the point at which it can safely be passed
  * to _del_CompleteFile().
  */
+  cf->err = NULL;
   cf->dr = NULL;
   cf->home = NULL;
   cf->path = NULL;
   cf->buff = NULL;
   cf->usrnam[0] = '\0';
   cf->envnam[0] = '\0';
-  cf->errmsg[0] = '\0';
+/*
+ * Allocate a place to record error messages.
+ */
+  cf->err = _new_ErrMsg();
+  if(!cf->err)
+    return _del_CompleteFile(cf);
 /*
  * Create the object that is used for reading directories.
  */
@@ -179,6 +184,7 @@ CompleteFile *_new_CompleteFile(void)
 CompleteFile *_del_CompleteFile(CompleteFile *cf)
 {
   if(cf) {
+    cf->err = _del_ErrMsg(cf->err);
     cf->dr = _del_DirReader(cf->dr);
     cf->home = _del_HomeDir(cf->home);
     cf->path = _del_PathName(cf->path);
@@ -231,8 +237,10 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
  * Check the arguments.
  */
   if(!cpl || !cf || !line || word_end < word_start) {
-    if(cf)
-      strcpy(cf->errmsg, "_cf_complete_file: Invalid arguments");
+    if(cf) {
+      _err_record_msg(cf->err, "_cf_complete_file: Invalid arguments",
+		      END_ERR_MSG);
+    };
     return 1;
   };
 /*
@@ -326,7 +334,8 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
  * backslash-escapes where needed.
  */
     if(_pn_append_to_path(cf->path, lptr, seglen, escaped) == NULL) {
-      strcpy(cf->errmsg, "Insufficient memory to complete filename");
+      _err_record_msg(cf->err, "Insufficient memory to complete filename",
+		      END_ERR_MSG);
       return 1;
     };
     lptr += seglen;
@@ -357,8 +366,8 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
  */
       value = getenv(cf->envnam);
       if(!value) {
-	const char *fmt = "Unknown environment variable: %.*s";
-	sprintf(cf->errmsg, fmt, ERRLEN - strlen(fmt), cf->envnam);
+	_err_record_msg(cf->err, "Unknown environment variable: ", cf->envnam,
+			END_ERR_MSG);
 	return 1;
       };
       vlen = strlen(value);
@@ -387,7 +396,8 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
  * Append the value of the environment variable to the output path.
  */
 	if(_pn_append_to_path(cf->path, value, strlen(value), escaped)==NULL) {
-	  strcpy(cf->errmsg, "Insufficient memory to complete filename");
+	  _err_record_msg(cf->err, "Insufficient memory to complete filename",
+			  END_ERR_MSG);
 	  return 1;
 	};
 /*
@@ -422,8 +432,7 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
       if(nleft == 0) {
 	if(cpl_add_completion(cpl, line, lptr-line, word_end, FS_DIR_SEP,
 			      "", "")) {
-	  strncpy(cf->errmsg, cpl_last_error(cpl), ERRLEN);
-	  cf->errmsg[ERRLEN] = '\0';
+	  _err_record_msg(cf->err, cpl_last_error(cpl), END_ERR_MSG);
 	  return 1;
 	};
 	return 0;
@@ -447,7 +456,7 @@ int _cf_complete_file(WordCompletion *cpl, CompleteFile *cf,
  */
 const char *_cf_last_error(CompleteFile *cf)
 {
-  return cf ? cf->errmsg : "NULL CompleteFile argument";
+  return cf ? _err_get_msg(cf->err) : "NULL CompleteFile argument";
 }
 
 /*.......................................................................
@@ -472,15 +481,15 @@ static int cf_expand_home_dir(CompleteFile *cf, const char *user)
  * Failed?
  */
   if(!home_dir) {
-    strncpy(cf->errmsg, _hd_last_home_dir_error(cf->home), ERRLEN);
-    cf->errmsg[ERRLEN] = '\0';
+    _err_record_msg(cf->err, _hd_last_home_dir_error(cf->home), END_ERR_MSG);
     return 1;
   };
 /*
  * Append the home directory to the pathname string.
  */
   if(_pn_append_to_path(cf->path, home_dir, -1, 0) == NULL) {
-    strcpy(cf->errmsg, "Insufficient memory for home directory expansion");
+    _err_record_msg(cf->err, "Insufficient memory for home directory expansion",
+		    END_ERR_MSG);
     return 1;
   };
   return 0;
@@ -515,7 +524,7 @@ static int cf_complete_username(CompleteFile *cf, WordCompletion *cpl,
   CfHomeArgs args;
   args.cf = cf;
   args.cpl = cpl;
-  args.prefix = prefix;
+  args.prefix_len = strlen(prefix);
   args.line = line;
   args.word_start = word_start;
   args.word_end = word_end;
@@ -524,9 +533,8 @@ static int cf_complete_username(CompleteFile *cf, WordCompletion *cpl,
  * Iterate through the list of users, recording those which start
  * with the specified prefix.
  */
-  if(_hd_scan_user_home_dirs(cf->home, &args, cf_homedir_callback)) {
-    strncpy(cf->errmsg, _hd_last_home_dir_error(cf->home), ERRLEN);
-    cf->errmsg[ERRLEN] = '\0';
+  if(_hd_scan_user_home_dirs(cf->home, prefix, &args, cf_homedir_callback)) {
+    _err_record_msg(cf->err, _hd_last_home_dir_error(cf->home), END_ERR_MSG);
     return 1;
   };
   return 0;
@@ -545,37 +553,22 @@ static HOME_DIR_FN(cf_homedir_callback)
   WordCompletion *cpl = args->cpl;
   CompleteFile *cf = args->cf;
 /*
- * Get the length of the username prefix.
- */
-  int prefix_len = strlen(args->prefix);
-/*
- * Get the length of the latest user name that is to be compared to
- * the prefix.
- */
-  int name_len = strlen(usrnam);
-/*
- * See if the latest username starts with the prefix that we are
- * searching for, and record its suffix in the array of matches if so.
- */
-  if(name_len >= prefix_len && strncmp(args->prefix, usrnam, prefix_len)==0) {
-/*
  * Copy the username into the pathname work buffer, adding backslash
  * escapes where needed.
  */
-    if(cf_prepare_suffix(cf, usrnam+prefix_len, args->escaped)) {
-      strncpy(errmsg, cf->errmsg, maxerr);
-      errmsg[maxerr] = '\0';
-      return 1;
-    };
+  if(cf_prepare_suffix(cf, usrnam+args->prefix_len, args->escaped)) {
+    strncpy(errmsg, _err_get_msg(cf->err), maxerr);
+    errmsg[maxerr] = '\0';
+    return 1;
+  };
 /*
  * Report the completion suffix that was copied above.
  */
-    if(cpl_add_completion(cpl, args->line, args->word_start, args->word_end,
-			  cf->buff->name, FS_DIR_SEP, FS_DIR_SEP)) {
-      strncpy(errmsg, cpl_last_error(cpl), maxerr);
-      errmsg[maxerr] = '\0';
-      return 1;
-    };
+  if(cpl_add_completion(cpl, args->line, args->word_start, args->word_end,
+			cf->buff->name, FS_DIR_SEP, FS_DIR_SEP)) {
+    strncpy(errmsg, cpl_last_error(cpl), maxerr);
+    errmsg[maxerr] = '\0';
+    return 1;
   };
   return 0;
 }
@@ -660,8 +653,7 @@ static int cf_complete_entry(CompleteFile *cf, WordCompletion *cpl,
  * Attempt to open the directory.
  */
   if(_dr_open_dir(cf->dr, dirpath, NULL)) {
-    const char *fmt = "Can't open directory: %.*s";
-    sprintf(cf->errmsg, fmt, ERRLEN - strlen(fmt), dirpath);
+    _err_record_msg(cf->err, "Can't open directory: ", dirpath, END_ERR_MSG);
     return 1;
   };
 /*
@@ -711,7 +703,9 @@ static int cf_complete_entry(CompleteFile *cf, WordCompletion *cpl,
 	  const char *type_suffix = "";  /* The suffix to add when listing */
 	  if(_pn_append_to_path(cf->path, file_name + prefix_len,
 				-1, escaped) == NULL) {
-	    strcpy(cf->errmsg, "Insufficient memory to complete filename.");
+	    _err_record_msg(cf->err,
+			    "Insufficient memory to complete filename.",
+			    END_ERR_MSG);
 	    return 1;
 	  };
 /*
@@ -763,7 +757,7 @@ static int cf_complete_entry(CompleteFile *cf, WordCompletion *cpl,
  * Output:
  *  return       char *  A pointer to nambuf on success. On error NULL is
  *                       returned and a description of the error is recorded
- *                       in cf->errmsg[].
+ *                       in cf->err.
  */
 static char *cf_read_name(CompleteFile *cf, const char *type,
 			  const char *string, int slen,
@@ -788,8 +782,7 @@ static char *cf_read_name(CompleteFile *cf, const char *type,
  * Did the name overflow the buffer?
  */
   if(namlen >= nammax) {
-    const char *fmt = "%.*s name too long";
-    sprintf(cf->errmsg, fmt, ERRLEN - strlen(fmt), type);
+    _err_record_msg(cf->err, type, " name too long", END_ERR_MSG);
     return NULL;
   };
 /*
@@ -844,7 +837,8 @@ static int cf_prepare_suffix(CompleteFile *cf, const char *suffix,
  * both the suffix and any backslashes that have to be inserted.
  */
   if(_pn_resize_path(cf->buff, suffix_len + nbsl) == NULL) {
-    strcpy(cf->errmsg, "Insufficient memory to complete filename");
+    _err_record_msg(cf->err, "Insufficient memory to complete filename",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -872,3 +866,5 @@ static int cf_prepare_suffix(CompleteFile *cf, const char *suffix,
   };
   return 0;
 }
+
+#endif  /* ifndef WITHOUT_FILE_SYSTEM */

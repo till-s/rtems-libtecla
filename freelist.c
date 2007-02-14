@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -31,6 +31,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include "freelist.h"
 
@@ -44,6 +45,7 @@ struct FreeList {
   size_t node_size;         /* The size of a free-list node */
   unsigned blocking_factor; /* The number of nodes per block */
   long nbusy;               /* The number of nodes that are in use */
+  long ntotal;              /* The total number of nodes in the free list */
   FreeListBlock *block;     /* The head of the list of free-list blocks */
   void *free_list;          /* The free-list of nodes */
 };
@@ -57,9 +59,6 @@ static void _thread_FreeListBlock(FreeList *fl, FreeListBlock *block);
  * node_size.
  *
  * Input:
- *  caller        const char *  The name of the calling function, for use in
- *                              error messages, or NULL to not report errors
- *                              to stderr.
  *  node_size         size_t    The size of the free-list nodes to be returned
  *                              by _new_FreeListNode(). Use sizeof() to
  *                              determine this.
@@ -68,8 +67,7 @@ static void _thread_FreeListBlock(FreeList *fl, FreeListBlock *block);
  * Output:
  *  return          FreeList *  The new freelist, or NULL on error.
  */
-FreeList *_new_FreeList(const char *caller, size_t node_size,
-			unsigned blocking_factor)
+FreeList *_new_FreeList(size_t node_size, unsigned blocking_factor)
 {
   FreeList *fl;  /* The new free-list container */
 /*
@@ -92,8 +90,7 @@ FreeList *_new_FreeList(const char *caller, size_t node_size,
  */
   fl = (FreeList *) malloc(sizeof(FreeList));
   if(!fl) {
-    if(caller)
-      fprintf(stderr, "_new_FreeList (%s): Insufficient memory.\n", caller);
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -104,6 +101,7 @@ FreeList *_new_FreeList(const char *caller, size_t node_size,
   fl->node_size = node_size;
   fl->blocking_factor = blocking_factor;
   fl->nbusy = 0;
+  fl->ntotal = 0;
   fl->block = NULL;
   fl->free_list = NULL;
 /*
@@ -111,9 +109,8 @@ FreeList *_new_FreeList(const char *caller, size_t node_size,
  */
   fl->block = _new_FreeListBlock(fl);
   if(!fl->block) {
-    if(caller)
-      fprintf(stderr, "_new_FreeList (%s): Insufficient memory.\n", caller);
-    return _del_FreeList(caller, fl, 1);
+    errno = ENOMEM;
+    return _del_FreeList(fl, 1);
   };
 /*
  * Add the new list of nodes to the free-list.
@@ -171,9 +168,6 @@ void _rst_FreeList(FreeList *fl)
  * Delete a free-list.
  *
  * Input:
- *  caller    const char *  The name of the calling function, for use in
- *                          error messages, or NULL if error messages
- *                          shouldn't be reported to stderr.
  *  fl          FreeList *  The free-list to be deleted, or NULL.
  *  force            int    If force==0 then _del_FreeList() will complain
  *                           and refuse to delete the free-list if any
@@ -185,16 +179,14 @@ void _rst_FreeList(FreeList *fl)
  *  return      FreeList *  Always NULL (even if the list couldn't be
  *                          deleted).
  */
-FreeList *_del_FreeList(const char *caller, FreeList *fl, int force)
+FreeList *_del_FreeList(FreeList *fl, int force)
 {
   if(fl) {
 /*
  * Check whether any nodes are in use.
  */
     if(!force && _busy_FreeListNodes(fl) != 0) {
-      if(caller)
-	fprintf(stderr, "_del_FreeList (%s): %ld nodes are still in use.\n",
-		caller, _busy_FreeListNodes(fl));
+      errno = EBUSY;
       return NULL;
     };
 /*
@@ -274,9 +266,6 @@ void *_new_FreeListNode(FreeList *fl)
  * Return an object to the free-list that it was allocated from.
  *
  * Input:
- *  caller  const char *  The name of the calling function, for use in
- *                        error messages, or NULL to not report errors
- *                        to stderr.
  *  fl        FreeList *  The free-list from which the object was taken.
  *  object        void *  The node to be returned.
  * Output:
@@ -317,6 +306,20 @@ long _busy_FreeListNodes(FreeList *fl)
 }
 
 /*.......................................................................
+ * Query the number of allocated nodes in the freelist which are
+ * currently unused.
+ *
+ * Input:
+ *  fl      FreeList *  The list to count wrt, or NULL.
+ * Output:
+ *  return      long    The number of unused nodes (or 0 if fl==NULL).
+ */
+long _idle_FreeListNodes(FreeList *fl)
+{
+  return fl ? (fl->ntotal - fl->nbusy) : 0;
+}
+
+/*.......................................................................
  * Allocate a new list of free-list nodes. On return the nodes will
  * be linked together as a list starting with the node at the lowest
  * address and ending with a NULL next pointer.
@@ -353,6 +356,10 @@ static FreeListBlock *_new_FreeListBlock(FreeList *fl)
  * Initialize the block as a linked list of FreeListNode's.
  */
   _thread_FreeListBlock(fl, block);
+/*
+ * Update the record of the number of nodes in the freelist.
+ */
+  fl->ntotal += fl->blocking_factor;
   return block;
 }
 

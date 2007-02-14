@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "freelist.h"
 #include "stringrp.h"
@@ -82,7 +83,7 @@ StringGroup *_new_StringGroup(int segment_size)
  * Check the arguments.
  */
   if(segment_size < 1) {
-    fprintf(stderr, "_new_StringGroup: Invalid segment_size argument.\n");
+    errno = EINVAL;
     return NULL;
   };
 /*
@@ -90,7 +91,7 @@ StringGroup *_new_StringGroup(int segment_size)
  */
   sg = (StringGroup *) malloc(sizeof(StringGroup));
   if(!sg) {
-    fprintf(stderr, "_new_StringGroup: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -104,8 +105,7 @@ StringGroup *_new_StringGroup(int segment_size)
 /*
  * Allocate the free list that is used to allocate list nodes.
  */
-  sg->node_mem = _new_FreeList("_new_StringGroup", sizeof(StringSegment),
-			       STR_SEG_BLK);
+  sg->node_mem = _new_FreeList(sizeof(StringSegment), STR_SEG_BLK);
   if(!sg->node_mem)
     return _del_StringGroup(sg);
   return sg;
@@ -134,7 +134,7 @@ StringGroup *_del_StringGroup(StringGroup *sg)
 /*
  * Delete the list nodes that contained the string segments.
  */
-    sg->node_mem = _del_FreeList("_del_StringGroup", sg->node_mem, 1);
+    sg->node_mem = _del_FreeList(sg->node_mem, 1);
     sg->head = NULL; /* Already deleted by deleting sg->node_mem */
 /*
  * Delete the container.
@@ -226,7 +226,8 @@ char *_sg_alloc_string(StringGroup *sg, int length)
     return NULL;
 /*
  * See if there is room to record the string in one of the existing
- * string segments.
+ * string segments. Do this by advancing the node pointer until we find
+ * a node with length+1 bytes unused, or we get to the end of the list.
  */
   for(node=sg->head; node && node->unused <= length; node=node->next)
     ;

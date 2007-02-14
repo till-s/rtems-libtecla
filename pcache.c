@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -29,9 +29,16 @@
  * of the copyright holder.
  */
 
+/*
+ * If file-system access is to be excluded, this module has no function,
+ * so all of its code should be excluded.
+ */
+#ifndef WITHOUT_FILE_SYSTEM
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "libtecla.h"
 #include "pathutil.h"
@@ -39,6 +46,7 @@
 #include "freelist.h"
 #include "direader.h"
 #include "stringrp.h"
+#include "errmsg.h"
 
 /*
  * The new_PcaPathConf() constructor sets the integer first member of
@@ -123,14 +131,6 @@ struct PathNode {
 static int add_PathNode(PathCache *pc, const char *dirname);
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so you don't decrease it below this number.
- */
-#define ERRLEN 200
-
-/*
  * Set the maximum length allowed for usernames.
  * names.
  */
@@ -141,6 +141,7 @@ static int add_PathNode(PathCache *pc, const char *dirname);
  * files of interest from comma-separated lists of directories.
  */
 struct PathCache {
+  ErrMsg *err;           /* The error reporting buffer */
   FreeList *node_mem;    /* A free-list of PathNode objects */
   CacheMem *abs_mem;     /* Memory for the filenames of absolute paths */
   CacheMem *rel_mem;     /* Memory for the filenames of relative paths */
@@ -158,7 +159,6 @@ struct PathCache {
   void *data;            /* Annonymous data to be passed to pc->check_fn() */
   char usrnam[USR_LEN+1];/* The buffer used when reading the names of */
                          /*  users. */
-  char errmsg[ERRLEN+1]; /* Error-report buffer */
 };
 
 /*
@@ -265,7 +265,7 @@ PathCache *new_PathCache(void)
  */
   pc = (PathCache *)malloc(sizeof(PathCache));
   if(!pc) {
-    fprintf(stderr, "new_PathCache: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -273,6 +273,7 @@ PathCache *new_PathCache(void)
  * container at least up to the point at which it can safely be passed
  * to del_PathCache().
  */
+  pc->err = NULL;
   pc->node_mem = NULL;
   pc->abs_mem = NULL;
   pc->rel_mem = NULL;
@@ -285,12 +286,16 @@ PathCache *new_PathCache(void)
   pc->check_fn = 0;
   pc->data = NULL;
   pc->usrnam[0] = '\0';
-  pc->errmsg[0] = '\0';
+/*
+ * Allocate a place to record error messages.
+ */
+  pc->err = _new_ErrMsg();
+  if(!pc->err)
+    return del_PathCache(pc);
 /*
  * Allocate the freelist of directory list nodes.
  */
-  pc->node_mem = _new_FreeList("new_PathCache", sizeof(PathNode),
-			       PATH_NODE_BLK);
+  pc->node_mem = _new_FreeList(sizeof(PathNode), PATH_NODE_BLK);
   if(!pc->node_mem)
     return del_PathCache(pc);
 /*
@@ -353,9 +358,13 @@ PathCache *del_PathCache(PathCache *pc)
 {
   if(pc) {
 /*
+ * Delete the error message buffer.
+ */
+    pc->err = _del_ErrMsg(pc->err);
+/*
  * Delete the memory of the list of path nodes.
  */
-    pc->node_mem = _del_FreeList(NULL, pc->node_mem, 1);
+    pc->node_mem = _del_FreeList(pc->node_mem, 1);
 /*
  * Delete the memory used to record filenames.
  */
@@ -447,7 +456,7 @@ void pca_set_check_fn(PathCache *pc, CplCheckFn *check_fn, void *data)
  */
 const char *pca_last_error(PathCache *pc)
 {
-  return pc ? pc->errmsg : "NULL PathCache argument";
+  return pc ? _err_get_msg(pc->err) : "NULL PathCache argument";
 }
 
 /*.......................................................................
@@ -562,7 +571,7 @@ int pca_scan_path(PathCache *pc, const char *path)
  * Output:
  *  return        int     0 - OK. The extracted path is in pc->path->name.
  *                        1 - Error. A description of the error will
- *                            have been left in pc->errmsg.
+ *                            have been left in pc->err.
  */
 static int pca_extract_dir(PathCache *pc, const char *path, const char **nextp)
 {
@@ -591,7 +600,8 @@ static int pca_extract_dir(PathCache *pc, const char *path, const char **nextp)
  * Append the rest of the directory path to the pathname buffer.
  */
   if(_pn_append_to_path(pc->path, sptr, pptr - sptr, 1) == NULL) {
-    strcpy(pc->errmsg, "Insufficient memory to record directory name");
+    _err_record_msg(pc->err, "Insufficient memory to record directory name",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -605,7 +615,8 @@ static int pca_extract_dir(PathCache *pc, const char *path, const char **nextp)
        strncmp(pc->path->name + dirlen - FS_DIR_SEP_LEN, FS_DIR_SEP,
 	       FS_DIR_SEP_LEN) != 0) {
       if(_pn_append_to_path(pc->path, FS_DIR_SEP, FS_DIR_SEP_LEN, 0) == NULL) {
-	strcpy(pc->errmsg, "Insufficient memory to record directory name");
+	_err_record_msg(pc->err, "Insufficient memory to record directory name",
+			END_ERR_MSG);
 	return 1;
       };
     };
@@ -639,7 +650,7 @@ static int pca_extract_dir(PathCache *pc, const char *path, const char **nextp)
  * Output:
  *  return     int     0 - OK. The username can be found in pc->usrnam.
  *                     1 - Error. A description of the error message
- *                         can be found in pc->errmsg.
+ *                         can be found in pc->err.
  */
 static int pca_read_username(PathCache *pc, const char *string, int slen,
 			     int literal, const char **nextp)
@@ -672,7 +683,7 @@ static int pca_read_username(PathCache *pc, const char *string, int slen,
  * Did the username overflow the buffer?
  */
   if(usrlen >= USR_LEN) {
-    strcpy(pc->errmsg, "Username too long");
+    _err_record_msg(pc->err, "Username too long", END_ERR_MSG);
     return 1;
   };
 /*
@@ -701,7 +712,7 @@ static CacheMem *new_CacheMem(void)
  */
   cm = (CacheMem *)malloc(sizeof(CacheMem));
   if(!cm) {
-    fprintf(stderr, "new_CacheMem: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -726,8 +737,7 @@ static CacheMem *new_CacheMem(void)
   cm->files_dim = FILES_BLK_FACT;
   cm->files = (char **) malloc(sizeof(*cm->files) * cm->files_dim);
   if(!cm->files) {
-    fprintf(stderr,
-        "new_CacheMem: Insufficient memory to allocate array of files.\n");
+    errno = ENOMEM;
     return del_CacheMem(cm);
   };
   return cm;
@@ -807,7 +817,8 @@ static int add_PathNode(PathCache *pc, const char *dirname)
  */
   node = (PathNode *) _new_FreeListNode(pc->node_mem);
   if(!node) {
-    sprintf(pc->errmsg, "Insufficient memory to cache new directory.");
+    _err_record_msg(pc->err, "Insufficient memory to cache new directory.",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -824,7 +835,8 @@ static int add_PathNode(PathCache *pc, const char *dirname)
  */
   node->dir = _sg_store_string(pc->abs_mem->sg, dirname, 0);
   if(!node->dir) {
-    strcpy(pc->errmsg, "Insufficient memory to store directory name.");
+    _err_record_msg(pc->err, "Insufficient memory to store directory name.",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -887,7 +899,8 @@ static int pca_scan_dir(PathCache *pc, const char *dirname, CacheMem *mem)
     _pn_clear_path(pc->path);
     if(_pn_append_to_path(pc->path, " ", 1, 0) == NULL ||
        _pn_append_to_path(pc->path, filename, -1, 1) == NULL) {
-      strcpy(pc->errmsg, "Insufficient memory to record filename");
+      _err_record_msg(pc->err, "Insufficient memory to record filename",
+		      END_ERR_MSG);
       return -1;
     };
 /*
@@ -895,7 +908,8 @@ static int pca_scan_dir(PathCache *pc, const char *dirname, CacheMem *mem)
  */
     copy = _sg_store_string(mem->sg, pc->path->name, 0);
     if(!copy) {
-      strcpy(pc->errmsg, "Insufficient memory to cache file name.");
+      _err_record_msg(pc->err, "Insufficient memory to cache file name.",
+		      END_ERR_MSG);
       return -1;
     };
 /*
@@ -909,7 +923,9 @@ static int pca_scan_dir(PathCache *pc, const char *dirname, CacheMem *mem)
       int needed = mem->files_dim + FILES_BLK_FACT;
       char **files = (char **) realloc(mem->files, sizeof(*mem->files)*needed);
       if(!files) {
-	strcpy(pc->errmsg, "Insufficient memory to extend filename cache.");
+	_err_record_msg(pc->err,
+			"Insufficient memory to extend filename cache.",
+			END_ERR_MSG);
 	return 1;
       };
       mem->files = files;
@@ -1122,7 +1138,7 @@ PcaPathConf *new_PcaPathConf(PathCache *pc)
  */
   ppc = (PcaPathConf *)malloc(sizeof(PcaPathConf));
   if(!ppc) {
-    strcpy(pc->errmsg, "Insufficient memory.");
+    _err_record_msg(pc->err, "Insufficient memory.", END_ERR_MSG);
     return NULL;
   };
 /*
@@ -1329,7 +1345,8 @@ CPL_MATCH_FN(pca_path_completions)
 	_pn_clear_path(pc->path);
 	if(_pn_append_to_path(pc->path, node->dir, -1, 0) == NULL ||
 	   _pn_append_to_path(pc->path, match+1, -1, 0) == NULL) {
-	  strcpy(pc->errmsg, "Insufficient memory to complete file name");
+	  _err_record_msg(pc->err, "Insufficient memory to complete file name",
+			  END_ERR_MSG);
 	  return 1;
 	};
 /*
@@ -1447,7 +1464,8 @@ static int pca_prepare_suffix(PathCache *pc, const char *suffix,
  * both the suffix and any backslashes that have to be inserted.
  */
   if(_pn_resize_path(pc->path, suffix_len + nbsl) == NULL) {
-    strcpy(pc->errmsg, "Insufficient memory to complete file name");
+    _err_record_msg(pc->err, "Insufficient memory to complete file name",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -1531,7 +1549,7 @@ static int cpa_cmd_contains_path(const char *prefix, int prefix_len)
  * Output:
  *  return const char *   The prepared prefix, or NULL on error, in
  *                        which case an error message will have been
- *                        left in pc->errmsg.
+ *                        left in pc->err.
  */
 static const char *pca_prepare_prefix(PathCache *pc, const char *prefix,
 				      size_t prefix_len, int escaped)
@@ -1542,7 +1560,8 @@ static const char *pca_prepare_prefix(PathCache *pc, const char *prefix,
   if(escaped) {
     _pn_clear_path(pc->path);
     if(_pn_append_to_path(pc->path, prefix, prefix_len, 1) == NULL) {
-      strcpy(pc->errmsg, "Insufficient memory to complete filename");
+      _err_record_msg(pc->err, "Insufficient memory to complete filename",
+		      END_ERR_MSG);
       return NULL;
     };
     return pc->path->name;
@@ -1605,7 +1624,7 @@ void ppc_file_start(PcaPathConf *ppc, int start_index)
  * Output:
  *  return       int    0 - OK
  *                      1 - Error (a description will have been placed
- *                                 in pc->errmsg[]).
+ *                                 in pc->err).
  */
 static int pca_expand_tilde(PathCache *pc, const char *path, int pathlen,
 			    int literal, const char **endp)
@@ -1632,15 +1651,16 @@ static int pca_expand_tilde(PathCache *pc, const char *path, int pathlen,
  */
     homedir = _hd_lookup_home_dir(pc->home, pc->usrnam);
     if(!homedir) {
-      strncpy(pc->errmsg, _hd_last_home_dir_error(pc->home), ERRLEN);
-      pc->errmsg[ERRLEN] = '\0';
+      _err_record_msg(pc->err, _hd_last_home_dir_error(pc->home), END_ERR_MSG);
       return 1;
     };
 /*
  * Append the home directory to the pathname string.
  */
     if(_pn_append_to_path(pc->path, homedir, -1, 0) == NULL) {
-      strcpy(pc->errmsg, "Insufficient memory for home directory expansion");
+      _err_record_msg(pc->err,
+		      "Insufficient memory for home directory expansion",
+		      END_ERR_MSG);
       return 1;
     };
   };
@@ -1686,3 +1706,5 @@ static void pca_remove_marks(PathCache *pc)
   };
   return;
 }
+
+#endif  /* ifndef WITHOUT_FILE_SYSTEM */

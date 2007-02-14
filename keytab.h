@@ -2,7 +2,7 @@
 #define keytab_h
 
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -33,8 +33,6 @@
  */
 
 #include "libtecla.h"
-#include "hash.h"
-#include "strngmem.h"
 
 /*-----------------------------------------------------------------------*
  * This module defines a binary-search symbol table of key-bindings.     *
@@ -49,69 +47,77 @@
  *                   or 1. Action functions should ignore this if
  *                   repeating the action multiple times isn't
  *                   appropriate.
+ *  data     void *  A pointer to action-specific data,
+ *                   cast to (void *).
  * Output:
  *  return    int    0 - OK.
  *                   1 - Error.
  */
-#define KT_KEY_FN(fn) int (fn)(GetLine *gl, int count)
+#define KT_KEY_FN(fn) int (fn)(GetLine *gl, int count, void *data)
 
 typedef KT_KEY_FN(KtKeyFn);
+
+/*
+ * Allow the association of arbitrary callback data with each action
+ * function.
+ */
+typedef struct {
+  KtKeyFn *fn;          /* The acion function */
+  void *data;           /* A pointer to arbitrary data to be passed to */
+                        /*  fn() whenever it is called. */
+} KtAction;
+
+/*
+ * Enumerate the possible sources of key-bindings in order of decreasing
+ * priority.
+ */
+typedef enum {
+  KTB_USER,         /* This is a binding being set by the user */
+  KTB_NORM,         /* This is the default binding set by the library */
+  KTB_TERM,         /* This is a binding taken from the terminal settings */
+/* The following entry must always be last */
+  KTB_NBIND         /* The number of binding sources listed above */
+} KtBinder;
 
 /*
  * Define an entry of a key-binding binary symbol table.
  */
 typedef struct {
-  char *keyseq;         /* The key sequence that triggers the macro */
-  int nc;               /* The number of characters in keyseq[] */
-  KtKeyFn *user_fn;     /* A user specified binding (or 0 if none) */
-  KtKeyFn *term_fn;     /* A terminal-specific binding (or 0 if none) */
-  KtKeyFn *norm_fn;     /* The default binding (or 0 if none) */
-  KtKeyFn *keyfn;       /* The function to execute when this key sequence */
-                        /*  is seen. This is the function above which has */
-                        /*  the highest priority. */
+  char *keyseq;                /* The key sequence that triggers the macro */
+  int nc;                      /* The number of characters in keyseq[] */
+  KtAction actions[KTB_NBIND]; /* Bindings from different sources */
+  int binder;                  /* The index of the highest priority element */
+                               /*  of actions[] that has been assigned an */
+                               /*  action function, or -1 if none have. */
 } KeySym;
 
 /*
- * When allocating or reallocating the key-binding table, how
- * many entries should be added?
+ * Provide an opaque type alias to the symbol table container.
  */
-#define KT_TABLE_INC 100
+typedef struct KeyTab KeyTab;
 
 /*
- * Define the size of the hash table that is used to associate action
- * names with action functions. This should be a prime number.
+ * Create a new symbol table.
  */
-#define KT_HASH_SIZE 113
-
-/*
- * Define a binary-symbol-table object.
- */
-typedef struct {
-  int size;           /* The allocated dimension of table[] */
-  int nkey;           /* The current number of members in the table */
-  KeySym *table;      /* The table of lexically sorted key sequences */
-  HashTable *actions; /* The hash table of actions */
-  StringMem *smem;    /* Memory for allocating strings */
-} KeyTab;
-
 KeyTab *_new_KeyTab(void);
-KeyTab *_del_KeyTab(KeyTab *kt);
 
 /*
- * Enumerate the possible sources of key-bindings.
+ * Delete the symbol table.
  */
-typedef enum {
-  KTB_USER,         /* This is a binding being set by the user */
-  KTB_TERM,         /* This is a binding taken from the terminal settings */
-  KTB_NORM          /* This is the default binding set by the library */
-} KtBinder;
+KeyTab *_del_KeyTab(KeyTab *kt);
 
 int _kt_set_keybinding(KeyTab *kt, KtBinder binder,
 		       const char *keyseq, const char *action);
 int _kt_set_keyfn(KeyTab *kt, KtBinder binder, const char *keyseq,
-		  KtKeyFn *keyfn);
+		  KtKeyFn *fn, void *data);
 
-int _kt_set_action(KeyTab *kt, const char *action, KtKeyFn *fn);
+int _kt_set_action(KeyTab *kt, const char *action, KtKeyFn *fn, void *data);
+
+/*
+ * Lookup the function that implements a given action.
+ */
+int _kt_lookup_action(KeyTab *kt, const char *action,
+		      KtKeyFn **fn, void **data);
 
 typedef enum {
   KT_EXACT_MATCH,   /* An exact match was found */
@@ -121,7 +127,7 @@ typedef enum {
 } KtKeyMatch;
 
 KtKeyMatch _kt_lookup_keybinding(KeyTab *kt, const char *binary_keyseq,
-				 int nc, int *first,int *last);
+				 int nc, KeySym **matches, int *nmatch);
 
 /*
  * Remove all key bindings that came from a specified source.
@@ -142,5 +148,10 @@ typedef struct {
  */
 int _kt_add_bindings(KeyTab *kt, KtBinder binder, const KtKeyBinding *bindings,
 		     unsigned n);
+
+/*
+ * Get information about the last error in this module.
+ */
+const char *_kt_last_error(KeyTab *kt);
 
 #endif

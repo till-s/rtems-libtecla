@@ -2,7 +2,7 @@
 #define homedir_h
 
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -75,7 +75,7 @@ const char *_hd_last_home_dir_error(HomeDir *home);
  */
 #define HOME_DIR_FN(fn) int (fn)(void *data, const char *usrnam, const char *homedir, char *errmsg, int maxerr)
 
-int _hd_scan_user_home_dirs(HomeDir *home, void *data,
+int _hd_scan_user_home_dirs(HomeDir *home, const char *prefix, void *data,
 			    HOME_DIR_FN(*callback_fn));
 
 #endif

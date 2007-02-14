@@ -1,7 +1,7 @@
 #ifndef stringmem_h
 #define stringmem_h
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -60,12 +60,12 @@ typedef struct StringMem StringMem;
 /*
  * Create a string free-list container and the first block of its free-list.
  */
-StringMem *_new_StringMem(const char *caller, unsigned blocking_factor);
+StringMem *_new_StringMem(unsigned blocking_factor);
 
 /*
  * Delete a string free-list.
  */
-StringMem *_del_StringMem(const char *caller, StringMem *sm, int force);
+StringMem *_del_StringMem(StringMem *sm, int force);
 
 /*
  * Allocate an array of 'length' chars.

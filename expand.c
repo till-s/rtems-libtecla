@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -29,6 +29,12 @@
  * of the copyright holder.
  */
 
+/*
+ * If file-system access is to be excluded, this module has no function,
+ * so all of its code should be excluded.
+ */
+#ifndef WITHOUT_FILE_SYSTEM
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +46,9 @@
 #include "homedir.h"
 #include "stringrp.h"
 #include "libtecla.h"
+#include "ioutil.h"
+#include "expand.h"
+#include "errmsg.h"
 
 /*
  * Specify the number of elements to extend the files[] array by
@@ -82,14 +91,13 @@ typedef struct {
 #define ENV_LEN 100
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so you don't decrease it below this number.
+ * Set the default number of spaces place between columns when listing
+ * a set of expansions.
  */
-#define ERRLEN 200
+#define EF_COL_SEP 2
 
 struct ExpandFile {
+  ErrMsg *err;            /* The error reporting buffer */
   StringGroup *sg;        /* A list of string segments in which */
                           /*  matching filenames are stored. */
   DirCache cache;         /* The cache of directory reader objects */
@@ -98,7 +106,6 @@ struct ExpandFile {
   int files_dim;          /* The allocated dimension of result.files[] */
   char usrnam[USR_LEN+1]; /* A user name */
   char envnam[ENV_LEN+1]; /* An environment variable name */
-  char errmsg[ERRLEN+1];  /* Error-report buffer */
   FileExpansion result;   /* The container used to return the results of */
                           /*  expanding a path. */
 };
@@ -119,6 +126,31 @@ static int ef_string_matches_pattern(const char *file, const char *pattern,
 				      int xplicit, const char *nextp);
 static int ef_cmp_strings(const void *v1, const void *v2);
 
+/*
+ * Encapsulate the formatting information needed to layout a
+ * multi-column listing of expansions.
+ */
+typedef struct {
+  int term_width;     /* The width of the terminal (characters) */
+  int column_width;   /* The number of characters within in each column. */
+  int ncol;           /* The number of columns needed */
+  int nline;          /* The number of lines needed */
+} EfListFormat;
+
+/*
+ * Given the current terminal width, and a list of file expansions,
+ * determine how to best use the terminal width to display a multi-column
+ * listing of expansions.
+ */
+static void ef_plan_listing(FileExpansion *result, int term_width,
+			    EfListFormat *fmt);
+
+/*
+ * Display a given line of a multi-column list of file-expansions.
+ */
+static int ef_format_line(FileExpansion *result, EfListFormat *fmt, int lnum,
+			  GlWriteFn *write_fn, void *data);
+
 /*.......................................................................
  * Create the resources needed to expand filenames.
  *
@@ -133,7 +165,7 @@ ExpandFile *new_ExpandFile(void)
  */
   ef = (ExpandFile *) malloc(sizeof(ExpandFile));
   if(!ef) {
-    fprintf(stderr, "new_ExpandFile: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -141,6 +173,7 @@ ExpandFile *new_ExpandFile(void)
  * container at least up to the point at which it can safely be passed
  * to del_ExpandFile().
  */
+  ef->err = NULL;
   ef->sg = NULL;
   ef->cache.mem = NULL;
   ef->cache.head = NULL;
@@ -152,7 +185,12 @@ ExpandFile *new_ExpandFile(void)
   ef->result.nfile = 0;
   ef->usrnam[0] = '\0';
   ef->envnam[0] = '\0';
-  ef->errmsg[0] = '\0';
+/*
+ * Allocate a place to record error messages.
+ */
+  ef->err = _new_ErrMsg();
+  if(!ef->err)
+    return del_ExpandFile(ef);
 /*
  * Allocate a list of string segments for storing filenames.
  */
@@ -162,7 +200,7 @@ ExpandFile *new_ExpandFile(void)
 /*
  * Allocate a freelist for allocating directory cache nodes.
  */
-  ef->cache.mem = _new_FreeList("new_ExpandFile", sizeof(DirNode), DIR_CACHE_BLK);
+  ef->cache.mem = _new_FreeList(sizeof(DirNode), DIR_CACHE_BLK);
   if(!ef->cache.mem)
     return del_ExpandFile(ef);
 /*
@@ -184,8 +222,7 @@ ExpandFile *new_ExpandFile(void)
   ef->result.files = (char **) malloc(sizeof(ef->result.files[0]) *
 				      ef->files_dim);
   if(!ef->result.files) {
-    fprintf(stderr,
-        "new_ExpandFile: Insufficient memory to allocate array of files.\n");
+    errno = ENOMEM;
     return del_ExpandFile(ef);
   };
   return ef;
@@ -216,7 +253,7 @@ ExpandFile *del_ExpandFile(ExpandFile *ef)
  * Delete the memory from which the DirNode list was allocated, thus
  * deleting the list at the same time.
  */
-    ef->cache.mem = _del_FreeList("del_ExpandFile", ef->cache.mem, 1);
+    ef->cache.mem = _del_FreeList(ef->cache.mem, 1);
     ef->cache.head = ef->cache.tail = ef->cache.next = NULL;
 /*
  * Delete the pathname buffer.
@@ -233,6 +270,10 @@ ExpandFile *del_ExpandFile(ExpandFile *ef)
       free(ef->result.files);
       ef->result.files = NULL;
     };
+/*
+ * Delete the error report buffer.
+ */
+    ef->err = _del_ErrMsg(ef->err);
 /*
  * Delete the container.
  */
@@ -312,10 +353,11 @@ FileExpansion *ef_expand_file(ExpandFile *ef, const char *path, int pathlen)
  * Check the arguments.
  */
   if(!ef || !path) {
-    if(ef)
-      strcpy(ef->errmsg, "ef_expand_file: NULL path argument");
-    else
-      fprintf(stderr, "ef_expand_file: NULL argument(s).\n");
+    if(ef) {
+      _err_record_msg(ef->err, "ef_expand_file: NULL path argument",
+		      END_ERR_MSG);
+    };
+    errno = EINVAL;
     return NULL;
   };
 /*
@@ -388,7 +430,8 @@ FileExpansion *ef_expand_file(ExpandFile *ef, const char *path, int pathlen)
       if(strncmp(path, FS_ROOT_DIR, FS_ROOT_DIR_LEN) == 0) {
 	dirname = FS_ROOT_DIR;
 	if(!_pn_append_to_path(ef->path, FS_ROOT_DIR, -1, 0)) {
-	  strcpy(ef->errmsg, "Insufficient memory to record path");
+	  _err_record_msg(ef->err, "Insufficient memory to record path",
+			  END_ERR_MSG);
 	  return NULL;
 	};
 	path += FS_ROOT_DIR_LEN;
@@ -417,7 +460,7 @@ FileExpansion *ef_expand_file(ExpandFile *ef, const char *path, int pathlen)
  * No files matched?
  */
     if(ef->result.nfile < 1) {
-      strcpy(ef->errmsg, "No files match");
+      _err_record_msg(ef->err, "No files match", END_ERR_MSG);
       return NULL;
     };
 /*
@@ -487,7 +530,8 @@ static int ef_match_relative_pathname(ExpandFile *ef, DirReader *dr,
  */
       if((separate && _pn_append_to_path(ef->path, FS_DIR_SEP, -1, 0)==NULL) ||
 	 _pn_append_to_path(ef->path, file, -1, 0)==NULL) {
-	strcpy(ef->errmsg, "Insufficient memory to record path");
+	_err_record_msg(ef->err, "Insufficient memory to record path",
+			END_ERR_MSG);
 	return 1;
       };
 /*
@@ -547,7 +591,7 @@ static int ef_match_relative_pathname(ExpandFile *ef, DirReader *dr,
  *                          recorded copy of the pathname.
  * Output:
  *  return           int     0 - OK.
- *                           1 - Error (ef->errmsg will contain a
+ *                           1 - Error (ef->err will contain a
  *                                      description of the error).
  */
 static int ef_record_pathname(ExpandFile *ef, const char *pathname,
@@ -569,8 +613,10 @@ static int ef_record_pathname(ExpandFile *ef, const char *pathname,
     char **files = (char **) realloc(ef->result.files,
 				     files_dim * sizeof(files[0]));
     if(!files) {
-      sprintf(ef->errmsg,
-	      "Insufficient memory to record all of the matching filenames");
+      _err_record_msg(ef->err,
+	     "Insufficient memory to record all of the matching filenames",
+	     END_ERR_MSG);
+      errno = ENOMEM;
       return 1;
     };
     ef->result.files = files;
@@ -594,14 +640,15 @@ static int ef_record_pathname(ExpandFile *ef, const char *pathname,
  * Output:
  *  return         char *  The pointer to the copy of the pathname.
  *                         On error NULL is returned and a description
- *                         of the error is left in ef->errmsg[].
+ *                         of the error is left in ef->err.
  */
 static char *ef_cache_pathname(ExpandFile *ef, const char *pathname,
 			       int remove_escapes)
 {
   char *copy = _sg_store_string(ef->sg, pathname, remove_escapes);
   if(!copy)
-    strcpy(ef->errmsg, "Insufficient memory to store pathname");
+    _err_record_msg(ef->err, "Insufficient memory to store pathname",
+		    END_ERR_MSG);
   return copy;
 }
 
@@ -618,7 +665,7 @@ static void ef_clear_files(ExpandFile *ef)
   _pn_clear_path(ef->path);
   ef->result.exists = 0;
   ef->result.nfile = 0;
-  ef->errmsg[0] = '\0';
+  _err_clear_msg(ef->err);
   return;
 }
 
@@ -630,7 +677,7 @@ static void ef_clear_files(ExpandFile *ef)
  *  pathname  const char *  The pathname of the directory.
  * Output:
  *  return       DirNode *  The cache entry of the new directory reader,
- *                          or NULL on error. On error, ef->errmsg will
+ *                          or NULL on error. On error, ef->err will
  *                          contain a description of the error.
  */
 static DirNode *ef_open_dir(ExpandFile *ef, const char *pathname)
@@ -647,7 +694,8 @@ static DirNode *ef_open_dir(ExpandFile *ef, const char *pathname)
   if(!cache->next) {
     node = (DirNode *) _new_FreeListNode(cache->mem);
     if(!node) {
-      sprintf(ef->errmsg, "Insufficient memory to open a new directory");
+      _err_record_msg(ef->err, "Insufficient memory to open a new directory",
+		      END_ERR_MSG);
       return NULL;
     };
 /*
@@ -661,7 +709,8 @@ static DirNode *ef_open_dir(ExpandFile *ef, const char *pathname)
  */
     node->dr = _new_DirReader();
     if(!node->dr) {
-      sprintf(ef->errmsg, "Insufficient memory to open a new directory");
+      _err_record_msg(ef->err, "Insufficient memory to open a new directory",
+		      END_ERR_MSG);
       node = (DirNode *) _del_FreeListNode(cache->mem, node);
       return NULL;
     };
@@ -683,8 +732,7 @@ static DirNode *ef_open_dir(ExpandFile *ef, const char *pathname)
  * Attempt to open the specified directory.
  */
   if(_dr_open_dir(node->dr, pathname, &errmsg)) {
-    strncpy(ef->errmsg, errmsg, ERRLEN);
-    ef->errmsg[ERRLEN] = '\0';
+    _err_record_msg(ef->err, errmsg, END_ERR_MSG);
     return NULL;
   };
 /*
@@ -988,7 +1036,7 @@ static int ef_cmp_strings(const void *v1, const void *v2)
  * Output:
  *  return      char *  A pointer to a copy of the output path in the
  *                      cache. On error NULL is returned, and a description
- *                      of the error is left in ef->errmsg[].
+ *                      of the error is left in ef->err.
  */
 static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
 {
@@ -1022,7 +1070,8 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  */
       if(spos < ppos && _pn_append_to_path(ef->path, path + spos, ppos-spos, 0)
 	 == NULL) {
-	strcpy(ef->errmsg, "Insufficient memory to expand path");
+	_err_record_msg(ef->err, "Insufficient memory to expand path",
+			END_ERR_MSG);
 	return NULL;
       };
 /*
@@ -1043,7 +1092,8 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  * whereas our ENV_LEN is much bigger than that.
  */
       if(envlen >= ENV_LEN) {
-	strcpy(ef->errmsg, "Environment variable name too long");
+	_err_record_msg(ef->err, "Environment variable name too long",
+			END_ERR_MSG);
 	return NULL;
       };
 /*
@@ -1055,15 +1105,16 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  */
       value = getenv(ef->envnam);
       if(!value) {
-	const char *fmt = "No expansion found for: $%.*s";
-	sprintf(ef->errmsg, fmt, ERRLEN - strlen(fmt), ef->envnam);
+	_err_record_msg(ef->err, "No expansion found for: $", ef->envnam,
+			END_ERR_MSG);
 	return NULL;
       };
 /*
  * Copy the value of the environment variable into the output pathname.
  */
       if(_pn_append_to_path(ef->path, value, -1, 0) == NULL) {
-	strcpy(ef->errmsg, "Insufficient memory to expand path");
+	_err_record_msg(ef->err, "Insufficient memory to expand path",
+			END_ERR_MSG);
 	return NULL;
       };
 /*
@@ -1077,7 +1128,7 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  */
   if(spos < ppos && _pn_append_to_path(ef->path, path + spos, ppos-spos, 0)
      == NULL) {
-    strcpy(ef->errmsg, "Insufficient memory to expand path");
+    _err_record_msg(ef->err, "Insufficient memory to expand path", END_ERR_MSG);
     return NULL;
   };
 /*
@@ -1111,7 +1162,7 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  * whereas our USR_LEN is much bigger than that.
  */
     if(usrlen >= USR_LEN) {
-      strcpy(ef->errmsg, "Username too long");
+      _err_record_msg(ef->err, "Username too long", END_ERR_MSG);
       return NULL;
     };
 /*
@@ -1123,8 +1174,7 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  */
     homedir = _hd_lookup_home_dir(ef->home, ef->usrnam);
     if(!homedir) {
-      strncpy(ef->errmsg, _hd_last_home_dir_error(ef->home), ERRLEN);
-      ef->errmsg[ERRLEN] = '\0';
+      _err_record_msg(ef->err, _hd_last_home_dir_error(ef->home), END_ERR_MSG);
       return NULL;
     };
     homelen = strlen(homedir);
@@ -1145,7 +1195,8 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  * Note that pptr may not be valid after this call.
  */
     if(_pn_resize_path(ef->path, plen - usrlen - 1 - skip + homelen)==NULL) {
-      strcpy(ef->errmsg, "Insufficient memory to expand filename");
+      _err_record_msg(ef->err, "Insufficient memory to expand filename",
+		      END_ERR_MSG);
       return NULL;
     };
 /*
@@ -1176,7 +1227,7 @@ static char *ef_expand_special(ExpandFile *ef, const char *path, int pathlen)
  */
 const char *ef_last_error(ExpandFile *ef)
 {
-  return ef ? ef->errmsg : "NULL ExpandFile argument";
+  return ef ? _err_get_msg(ef->err) : "NULL ExpandFile argument";
 }
 
 /*.......................................................................
@@ -1193,26 +1244,83 @@ const char *ef_last_error(ExpandFile *ef)
  */
 int ef_list_expansions(FileExpansion *result, FILE *fp, int term_width)
 {
-  int maxlen;    /* The length of the longest matching string */
-  int width;     /* The width of a column */
-  int ncol;      /* The number of columns to list */
-  int nrow;      /* The number of rows needed to list all of the expansions */
-  int row,col;   /* The row and column being written to */
-  int i;
-/*
- * Check the arguments.
+  return _ef_output_expansions(result, _io_write_stdio, fp, term_width);
+}
+
+/*.......................................................................
+ * Print out an array of matching files via a callback.
+ *
+ * Input:
+ *  result  FileExpansion *  The container of the sorted array of
+ *                           expansions.
+ *  write_fn    GlWriteFn *  The function to call to write the
+ *                           expansions or 0 to discard the output.
+ *  data             void *  Anonymous data to pass to write_fn().
+ *  term_width        int    The width of the terminal.
+ * Output:
+ *  return            int    0 - OK.
+ *                           1 - Error.
  */
-  if(!result || !fp) {
-    fprintf(stderr, "ef_list_expansions: NULL argument(s).\n");
-    return 1;
-  };
+int _ef_output_expansions(FileExpansion *result, GlWriteFn *write_fn,
+			  void *data, int term_width)
+{
+  EfListFormat fmt; /* List formatting information */
+  int lnum;          /* The sequential number of the line to print next */
 /*
  * Not enough space to list anything?
  */
   if(term_width < 1)
     return 0;
 /*
- * Work out the maximum length of the matching filenames.
+ * Do we have a callback to write via, and any expansions to be listed?
+ */
+  if(write_fn && result && result->nfile>0) {
+/*
+ * Work out how to arrange the listing into fixed sized columns.
+ */
+    ef_plan_listing(result, term_width, &fmt);
+/*
+ * Print the listing to the specified stream.
+ */
+    for(lnum=0; lnum < fmt.nline; lnum++) {
+      if(ef_format_line(result, &fmt, lnum, write_fn, data))
+	return 1;
+    };
+  };
+  return 0;
+}
+
+/*.......................................................................
+ * Work out how to arrange a given array of completions into a listing
+ * of one or more fixed size columns.
+ *
+ * Input:
+ *  result   FileExpansion *   The set of completions to be listed.
+ *  term_width         int     The width of the terminal. A lower limit of
+ *                             zero is quietly enforced.
+ * Input/Output:
+ *  fmt       EfListFormat *   The formatting information will be assigned
+ *                             to the members of *fmt.
+ */
+static void ef_plan_listing(FileExpansion *result, int term_width,
+			    EfListFormat *fmt)
+{
+  int maxlen;    /* The length of the longest matching string */
+  int i;
+/*
+ * Ensure that term_width >= 0.
+ */
+  if(term_width < 0)
+    term_width = 0;
+/*
+ * Start by assuming the worst case, that either nothing will fit
+ * on the screen, or that there are no matches to be listed.
+ */
+  fmt->term_width = term_width;
+  fmt->column_width = 0;
+  fmt->nline = fmt->ncol = 0;
+/*
+ * Work out the maximum length of the matching strings.
  */
   maxlen = 0;
   for(i=0; i<result->nfile; i++) {
@@ -1224,42 +1332,117 @@ int ef_list_expansions(FileExpansion *result, FILE *fp, int term_width)
  * Nothing to list?
  */
   if(maxlen == 0)
+    return;
+/*
+ * Split the available terminal width into columns of
+ * maxlen + EF_COL_SEP characters.
+ */
+  fmt->column_width = maxlen;
+  fmt->ncol = fmt->term_width / (fmt->column_width + EF_COL_SEP);
+/*
+ * If the column width is greater than the terminal width, zero columns
+ * will have been selected. Set a lower limit of one column. Leave it
+ * up to the caller how to deal with completions who's widths exceed
+ * the available terminal width.
+ */
+  if(fmt->ncol < 1)
+    fmt->ncol = 1;
+/*
+ * How many lines of output will be needed?
+ */
+  fmt->nline = (result->nfile + fmt->ncol - 1) / fmt->ncol;
+  return;
+}
+
+/*.......................................................................
+ * Render one line of a multi-column listing of completions, using a
+ * callback function to pass the output to an arbitrary destination.
+ *
+ * Input:
+ *  result   FileExpansion *  The container of the sorted array of
+ *                            completions.
+ *  fmt       EfListFormat *  Formatting information.
+ *  lnum               int    The index of the line to print, starting
+ *                            from 0, and incrementing until the return
+ *                            value indicates that there is nothing more
+ *                            to be printed.
+ *  write_fn     GlWriteFn *  The function to call to write the line, or
+ *                            0 to discard the output.
+ *  data              void *  Anonymous data to pass to write_fn().
+ * Output:
+ *  return             int    0 - Line printed ok.
+ *                            1 - Nothing to print.
+ */
+static int ef_format_line(FileExpansion *result, EfListFormat *fmt, int lnum,
+			  GlWriteFn *write_fn, void *data)
+{
+  int col;             /* The index of the list column being output */
+/*
+ * If the line index is out of bounds, there is nothing to be written.
+ */
+  if(lnum < 0 || lnum >= fmt->nline)
+    return 1;
+/*
+ * If no output function has been provided, return as though the line
+ * had been printed.
+ */
+  if(!write_fn)
     return 0;
 /*
- * Split the available terminal width into columns of maxlen + 2 characters.
- */
-  width = maxlen + 2;
-  ncol = term_width / width;
-/*
- * If the column width is greater than the terminal width, the matches will
- * just have to overlap onto the next line.
- */
-  if(ncol < 1)
-    ncol = 1;
-/*
- * How many rows will be needed?
- */
-  nrow = (result->nfile + ncol - 1) / ncol;
-/*
- * Print the expansions out in ncol columns, sorted in row order within each
+ * Print the matches in 'ncol' columns, sorted in line order within each
  * column.
  */
-  for(row=0; row < nrow; row++) {
-    for(col=0; col < ncol; col++) {
-      int m = col*nrow + row;
-      if(m < result->nfile) {
-	const char *filename = result->files[m];
-	if(fprintf(fp, "%s%-*s%s", filename,
-		   (int) (ncol > 1 ? maxlen - strlen(filename):0), "",
-		   col<ncol-1 ? "  " : "\r\n") < 0)
-	  return 1;
-      } else {
-	if(fprintf(fp, "\r\n") < 0)
-	  return 1;
-	break;
+  for(col=0; col < fmt->ncol; col++) {
+    int m = col*fmt->nline + lnum;
+/*
+ * Is there another match to be written? Note that in general
+ * the last line of a listing will have fewer filled columns
+ * than the initial lines.
+ */
+    if(m < result->nfile) {
+      char *file = result->files[m];
+/*
+ * How long are the completion and type-suffix strings?
+ */
+      int flen = strlen(file);
+/*
+ * Write the completion string.
+ */
+      if(write_fn(data, file, flen) != flen)
+	return 1;
+/*
+ * If another column follows the current one, pad to its start with spaces.
+ */
+      if(col+1 < fmt->ncol) {
+/*
+ * The following constant string of spaces is used to pad the output.
+ */
+	static const char spaces[] = "                    ";
+	static const int nspace = sizeof(spaces) - 1;
+/*
+ * Pad to the next column, using as few sub-strings of the spaces[]
+ * array as possible.
+ */
+	int npad = fmt->column_width + EF_COL_SEP - flen;
+	while(npad>0) {
+	  int n = npad > nspace ? nspace : npad;
+	  if(write_fn(data, spaces + nspace - n, n) != n)
+	    return 1;
+	  npad -= n;
+	};
       };
     };
+  };
+/*
+ * Start a new line.
+ */
+  {
+    char s[] = "\r\n";
+    int n = strlen(s);
+    if(write_fn(data, s, n) != n)
+      return 1;
   };
   return 0;
 }
 
+#endif  /* ifndef WITHOUT_FILE_SYSTEM */

@@ -94,34 +94,79 @@ options may be of interest to you. At first glance, the use of a GNU
 configure script by the tecla library, may appear to reduce your
 options for controlling what gets made, and where it gets installed,
 but this isn't the case, because many of the parameters configured by
-the configure script are assigned to make variables which can be
+the configure script are assigned to makefile variables which can be
 overriden when you run make.
 
-For example, lets say that you have your own configuration script in
-the parent directory of the libtecla top-level directory. In your
-configuration script, you would first need to have the following line:
+Configure script options:
 
-  (cd libtecla; ./configure)
+  If the users of your package won't benefit from having access to the
+  tecla man pages, you can shorten the length of time taken to run the
+  configure script by telling this script not to preprocess the man
+  pages. This is done as follows.
+
+    ./configure --without-man-pages
+
+  Note that this option also causes the makefile man-page installation
+  targets to do nothing.
+
+  Similarly, if you don't want your users to have access to the
+  filesystem while they are editing input lines using gl_get_line(),
+  then use the following configuration argument.
+
+    ./configure --without-file-actions
+
+  This will completely remove the "expand-filename", "read-from-file",
+  "read-init-files", and "list-glob" action functions. It will also
+  arrange that the default behavior of actions such as "complete-word"
+  and "list-or-eof" be changed to show no completions, instead of the
+  normal default of showing filename completions.
+
+  If you are using a system that doesn't have a file-system, such as an
+  embedded system, then libtecla can be built with all code that
+  accesses the filesystem removed. This will make the library a bit
+  smaller, and potentially avoid running into problems of missing system
+  functions related to file-system access. This is done with the
+  following configuration option.
+
+    ./configure --without-file-system
+
+  Beware that this not only prevents the user from accessing the
+  filesystem while editing an input line in gl_get_line(), but also
+  removes all public file-related functions, such as the pathname
+  expansion module. When using gl_get_line() in this configuration,
+  the functions that load and save history from and to files, are
+  stubs that report an error if called upon to read files. The
+  gl_configure_getline() function can still be called upon to
+  configure gl_get_line() via its app_string argument, but passing it
+  a filename in either the app_file or user_file arguments will result
+  in an error being reported.
+
+Now lets say that you have your own configuration script in the parent
+directory of the libtecla top-level directory, and that you don't want
+tecla's man pages to be generated. In your configuration script, you
+would first need to have a line similar to the following:
+
+  (cd libtecla; ./configure --without-man-pages)
 
 Now, from your makefile or whatever script you use to build your
-application, you would need to make the library. Assuming that your
-makefile or build script is in the parent directory of the libtecla
-distribution, the following line tells make to just make the
-non-reentrant, static version of the tecla library, and to install it
-and the tecla include file in sub-directories called lib and include
-in your current directory.
+application, you would need to make the tecla library. Assuming that
+your makefile or build script is in the parent directory of the
+libtecla distribution, then the following line tells make to just
+build the non-reentrant, static version of the tecla library, and then
+to install it and the tecla include file in sub-directories called lib
+and include in your current directory.
 
   (cd libtecla; make LIBDIR=../lib INCDIR=../include TARGETS=normal TARGET_LIBS="static" install_lib install_inc)
 
-First, the LIBDIR=../lib means that on installing the library, it
-should be placed in the directory libtecla/../lib. Similarly INCDIR
-tells make where to place the include files. The install_lib and
-install_inc targets tell make to install the libraries and the include
-file. Because the install_man and install_bin targets have been
-omitted in this example, the man pages and programs aren't installed.
-If you were to include these additional targets then you could use the
-MANDIR and BINDIR variables, respectively to control where they were
-installed.
+In this statement the LIBDIR=../lib component means that on installing
+the library, the make command should place the library in the
+directory libtecla/../lib. Similarly INCDIR tells make where to place
+the include files. The install_lib and install_inc targets tell make
+to install the libraries and the include file. Because the install_man
+and install_bin targets have been omitted in this example, the man
+pages and programs aren't installed.  If you were to include these
+additional targets then you could use the MANDIR and BINDIR variables,
+respectively to control where they were installed.
 
 The TARGETS variable is used to specify which of the normal and
 reentrant versions of the library are compiled. This can contain one
