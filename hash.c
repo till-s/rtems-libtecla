@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 
 #include "hash.h"
 #include "strngmem.h"
@@ -68,27 +69,18 @@ typedef struct {
 } HashBucket;
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so you don't decrease it below this number.
- */
-#define ERRLEN 200
-
-/*
  * A hash-table consists of 'size' hash buckets.
  * Note that the HashTable typedef for this struct is contained in hash.h.
  */
 struct HashTable {
-  char errmsg[ERRLEN+1];/* Error-report buffer */
-  HashMemory *mem;      /* HashTable free-list */
-  int internal_mem;     /* True if 'mem' was allocated by _new_HashTable() */
-  int case_sensitive;   /* True if case is significant in lookup keys */
-  int size;             /* The number of hash buckets */
-  HashBucket *bucket;   /* An array of 'size' hash buckets */
+  HashMemory *mem;         /* HashTable free-list */
+  int internal_mem;        /* True if 'mem' was allocated by _new_HashTable() */
+  int case_sensitive;      /* True if case is significant in lookup keys */
+  int size;                /* The number of hash buckets */
+  HashBucket *bucket;      /* An array of 'size' hash buckets */
   int (*keycmp)(const char *, const char *); /* Key comparison function */
-  void *app_data;       /* Application-provided data */
-  HASH_DEL_FN(*del_fn); /* Application-provided 'app_data' destructor */
+  void *app_data;          /* Application-provided data */
+  HASH_DEL_FN(*del_fn);    /* Application-provided 'app_data' destructor */
 };
 
 static HashNode *_del_HashNode(HashTable *hash, HashNode *node);
@@ -119,7 +111,7 @@ HashMemory *_new_HashMemory(int hash_count, int node_count)
  */
   mem = (HashMemory *) malloc(sizeof(HashMemory));
   if(!mem) {
-    fprintf(stderr, "_new_HashMemory: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -132,15 +124,13 @@ HashMemory *_new_HashMemory(int hash_count, int node_count)
 /*
  * Allocate the two free-lists.
  */
-  mem->hash_memory = _new_FreeList("_new_HashMemory", sizeof(HashTable),
-				  hash_count);
+  mem->hash_memory = _new_FreeList(sizeof(HashTable), hash_count);
   if(!mem->hash_memory)
     return _del_HashMemory(mem, 1);
-  mem->node_memory = _new_FreeList("_new_HashMemory", sizeof(HashNode),
-				  node_count);
+  mem->node_memory = _new_FreeList(sizeof(HashNode), node_count);
   if(!mem->node_memory)
     return _del_HashMemory(mem, 1);
-  mem->string_memory = _new_StringMem("_new_HashMemory", 64);
+  mem->string_memory = _new_StringMem(64);
   if(!mem->string_memory)
     return _del_HashMemory(mem, 1);
 /*
@@ -167,16 +157,15 @@ HashMemory *_new_HashMemory(int hash_count, int node_count)
  */
 HashMemory *_del_HashMemory(HashMemory *mem, int force)
 {
-  const char *caller = "_del_HashMemory";
   if(mem) {
     if(!force && (_busy_FreeListNodes(mem->hash_memory) > 0 ||
 		  _busy_FreeListNodes(mem->node_memory) > 0)) {
-      fprintf(stderr, "%s: Free-list in use.\n", caller);
+      errno = EBUSY;
       return NULL;
     };
-    mem->hash_memory = _del_FreeList(caller, mem->hash_memory, force);
-    mem->node_memory = _del_FreeList(caller, mem->node_memory, force);
-    mem->string_memory = _del_StringMem(caller, mem->string_memory, force);
+    mem->hash_memory = _del_FreeList(mem->hash_memory, force);
+    mem->node_memory = _del_FreeList(mem->node_memory, force);
+    mem->string_memory = _del_StringMem(mem->string_memory, force);
     free(mem);
   };
   return NULL;
@@ -224,7 +213,7 @@ HashTable *_new_HashTable(HashMemory *mem, int size, HashCase hcase,
  * Check arguments.
  */
   if(size <= 0) {
-    fprintf(stderr, "_new_HashTable: Illegal table size (%d).\n", size);
+    errno = EINVAL;
     return NULL;
   };
 /*
@@ -240,7 +229,7 @@ HashTable *_new_HashTable(HashMemory *mem, int size, HashCase hcase,
  */
   hash = (HashTable *) _new_FreeListNode(mem->hash_memory);
   if(!hash) {
-    fprintf(stderr, "_new_HashTable: Insufficient memory.\n");
+    errno = ENOMEM;
     if(allocate_mem)
       mem = _del_HashMemory(mem, 1);
     return NULL;
@@ -250,7 +239,6 @@ HashTable *_new_HashTable(HashMemory *mem, int size, HashCase hcase,
  * the container at least up to the point at which it can safely
  * be passed to _del_HashTable().
  */
-  hash->errmsg[0] = '\0';
   hash->mem = mem;
   hash->internal_mem = allocate_mem;
   hash->case_sensitive = hcase==HONOUR_CASE;
@@ -264,8 +252,7 @@ HashTable *_new_HashTable(HashMemory *mem, int size, HashCase hcase,
  */
   hash->bucket = (HashBucket *) malloc(sizeof(HashBucket) * size);
   if(!hash->bucket) {
-    fprintf(stderr, "_new_HashTable: Insufficient memory for %d buckets.\n",
-	    size);
+    errno = ENOMEM;
     return _del_HashTable(hash);
   };
 /*
@@ -351,8 +338,10 @@ Symbol *_new_HashSymbol(HashTable *hash, const char *name, int code,
 /*
  * Check arguments.
  */
-  if(!hash || !name)
+  if(!hash || !name) {
+    errno = EINVAL;
     return NULL;
+  };
 /*
  * Get the hash bucket of the specified name.
  */

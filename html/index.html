@@ -25,9 +25,9 @@ in threaded programs. The option to enable this is discussed in the
 Makefile, and specific discussions of thread safety are presented in
 the included man pages.
 <P>
-The current version is version 1.4.1. This may be obtained from:
+The current version is version 1.6.1. This may be obtained from:
 <P>
-  <a href="libtecla-1.4.1.tar.gz">http://www.astro.caltech.edu/~mcs/tecla/libtecla-1.4.1.tar.gz</a>
+  <a href="libtecla-1.6.1.tar.gz">http://www.astro.caltech.edu/~mcs/tecla/libtecla-1.6.1.tar.gz</a>
 <P>
 
 For the sake of automated scripts, the following URL always points to
@@ -58,12 +58,14 @@ library can be found <a href="changes.html">here</a>.
 The following are html versions of the libtecla man pages:
 
 <UL>
-<LI>  <a href="libtecla.html">libtecla(3)</a>           -  An introduction to the tecla library.
-<LI>  <a href="gl_get_line.html">gl_get_line(3)</a>        -  The interactive line-input function.
-<LI>  <a href="cpl_complete_word.html">cpl_complete_word(3)</a>  -  The word (eg. filename) completion function.
-<LI>  <a href="ef_expand_file.html">ef_expand_file(3)</a>     -  The filename expansion function.
-<LI>  <a href="pca_lookup_file.html">pca_lookup_file(3)</a>     -  A directory-list based filename lookup and completion module.
-<LI>  <a href="enhance.html">enhance(3)</a>     -  A  program that adds command-line editing to third party programs.
+<LI>  <a href="tecla.html">tecla</a>            -   Documentation for users of programs which use gl_get_line().
+<LI>  <a href="libtecla.html">libtecla</a>           -  A programmers introduction to the tecla library.
+<LI>  <a href="gl_get_line.html">gl_get_line</a>        -  The interactive line-input function.
+<LI>  <a href="gl_io_mode.html">gl_io_mode</a>        -  Using gl_get_line() in a non-blocking fashion.
+<LI>  <a href="cpl_complete_word.html">cpl_complete_word</a>  -  The word (eg. filename) completion function.
+<LI>  <a href="ef_expand_file.html">ef_expand_file</a>     -  The filename expansion function.
+<LI>  <a href="pca_lookup_file.html">pca_lookup_file</a>     -  A directory-list based filename lookup and completion module.
+<LI>  <a href="enhance.html">enhance</a>     -  A  program that adds command-line editing to third party programs.
 </UL>
 
 <H2>Portability</H2>
@@ -73,18 +75,20 @@ without any problems on any UNIX or UNIX like system. So far it has
 been reported to work on the following systems:
 
 <pre>
-  Sun Solaris 2.5,2.6,7,8, with any of gcc, Sun C, or g++.
+  Sun Solaris 2.5,2.6,7,8,9 with any of gcc, Sun C, or g++.
   Mandrake Linux 7.1 etc.., gcc
   Red Hat Linux 7 etc.., gcc
+  Fedora Core 1, gcc
   Suse Linux 6.4, gcc
   IBM AIX 4.3.3, gcc
   HP-UX 10.20, HP-UX 11, gcc, c89
-  SCO UnixWare 7.1.1
   FreeBSD, gcc
   Alpha OSF1, cc, gcc
   Mac OS X
   Cygwin (running under Windows)
   QNX
+  NetBSD 1.6, 386, gcc
+  SGI IRIX 6.5
 </pre>
 
 There haven't been many reports concerning the POSIX reentrant
@@ -93,24 +97,26 @@ systems on which the reentrant version is known to work, shouldn't be
 taken as an indication that the reentrant version doesn't work.
 
 <pre>
-  Sun Solaris 2.5,2.6,7,8, with any of gcc, Sun C, or g++.
-  Mandrake Linux 7.1, gcc
-  RedHat Linux 7.0,7.1, gcc
-  SuSe Linux 6.4, gcc
+  Sun Solaris 2.5,2.6,7,8,9 with any of gcc, Sun C, or g++.
+  Mandrake Linux, gcc
+  RedHat Linux, gcc
+  Fedora Core, gcc
+  SuSE Linux, gcc
   HP-UX 11, gcc
   IBM AIX 4.3.3, gcc
   Alpha OSF1, cc
+  SGI IRIX 6.5
 </pre>
 
 The only system that is known to have issues with the reentrant
 version of the library is SCO UnixWare 7.1.1. The problem is in the
 system provided signal.h, which breaks when POSIX_C_SOURCE is
-defined. It has been reported that this can be fixed by editing
+defined. It has been reported that this can be "fixed" by editing
 signal.h.
 
 <P>
 If you compile the library on a system that isn't mentioned above,
 please send E-mail to <b>mcs@astro.caltech.edu</b>.
 <HR>
-Martin Shepherd (25-May-2002)
+Martin Shepherd (31-Oct-2004)
 </BODY>

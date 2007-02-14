@@ -1,5 +1,235 @@
 This file lists major changes which accompany each new release.
 
+Version 1.6.1:
+
+  This is primarily a minor bug-fix release.
+
+  One added feature is the ability to call gl_normal_io() from
+  callbacks registered by gl_watch_fd() and
+  gl_inactivity_timeout(). This allows these callbacks to cleanly
+  suspend line editing before either reading from the terminal, or
+  writing to the terminal; and then subsequently causes the input line
+  to be automatically redisplayed, and line-editing to be resumed by
+  gl_get_line(), as soon as the callback returns.
+
+  Another minor change is that if the terminal type specified in the
+  TERM environment variable is set to "dumb", gl_get_line() now treats
+  the terminal as though it were a non-interactive stream, rather than
+  treating it as a VT100-compatible terminal. This means that it
+  doesn't either prompt for input, or perform any command-line
+  editing, even when it really is interacting with a terminal. This is
+  aimed at the rare situation where a third-pary program that connects
+  to libtecla through an embedded pseudo-terminal, needs to be forced
+  to behave as though it weren't talking to a terminal, in order that
+  it be useable in non-interactive scripts.
+
+  Note that in the previous release, the optional configuration
+  function, gl_tty_signals(), was incorrectly swapping the suspend and
+  terminal signal handlers before installing them.
+
+  A configuration problem that prevented select() from being used
+  under MacOS X, has been fixed.
+
+  Although not documented in the man page, it was meant to be possible
+  to take the input line that one call to gl_get_line() returned, and
+  ask the next call to gl_get_line() to present it back to the user
+  for re-editing, simply by passing the pointer returned by one call
+  to gl_get_line() as the start_line argument of the next call to
+  gl_get_line(). This feature unfortunately stopped working in 1.6.0,
+  so this release restores it, and officially documents it in the man
+  page documentation of gl_get_line().
+
+  In the previous version of the library, calling gl_terminal_size()
+  on a system without SIGWINCH support, would crash the
+  application. This has been fixed.
+
+  Libtecla now apparently compiles cleanly under IRIX.
+
+Version 1.6.0:
+
+  This release is primarily a bug-fix release. However there are also
+  four new functions, so the minor version number has been
+  incremented to reflect this.
+
+  Two of the new functions are gl_automatic_history() and
+  gl_append_history(). The former of these functions allows the
+  application to tell gl_get_line() not to automatically archive
+  entered lines in the history list. The second of these functions
+  allows the application to explicitly append a line to the history
+  list. Thus together, these two functions allow the calling
+  application to take over control of what is placed in the history
+  list.
+
+  The third new function is gl_query_char(), which prompts the user
+  for a single character reply, which the user can then type without
+  having to hit return to enter it. Unless echoing is disabled, the
+  character that is entered is then displayed after the prompt,
+  and a newline is started.
+
+  Finally, the 4th new function is gl_read_char(), which also reads
+  a single character from the user, but doesn't prompt the user, write
+  anything to the terminal, or disturb any partially entered input
+  line. It is thus safe to call this function not only from between
+  calls to gl_get_line(), but also from application callback
+  functions, even if gl_normal_io() hasn't been called.
+
+  When using the history-search-backwards or history-search-forwards
+  actions, if the search prefix that the user typed, contains any of
+  the *,? or [ globbing characters, it is now treated as a glob
+  pattern to be matched against historical lines, instead of a simple
+  prefix.
+
+  I have added a --without-file-system option to the configure
+  script. This is intended for use in embedded systems that either
+  don't have filesystems, or where the file-system code in libtecla is
+  seen as unwanted bloat. See the INSTALL document for details.
+
+  Similarly, I also added a --without-file-actions option to the
+  configure script. This allows the application author/installer to
+  prevent users of gl_get_line() from accessing the filesystem with
+  the builtin actions of gl_get_line(). It does this by removing a
+  number of action functions, such as expand-filename, and list-glob,
+  and by changing the default behavior of other actions, such as
+  complete-word and list-or-eof, to show no completions.
+
+  Now to the bugs that have been fixed. Version 1.5.0 had a lot of big
+  internal changes, so there are a number of bugs that needed to be
+  fixed.  There was a bug which caused a crash if gl_load_history()
+  was called multiple times. There was another bug which caused a
+  prompt not to be displayed on the next line after switching from
+  reading input from a file to reading from the terminal. Also, in
+  tecla configuration files, backslash escaped characters within
+  key-binding key-sequences weren't being escaped. Thus ^\\ got
+  interpretted as a control-\ followed by a \ character instead of as
+  a control-\. There was a bug in the history recall mechanism which
+  caused the search prefix to be forgotten in certain complicated
+  usage scenarios. There was a minor memory leak in the
+  gl_configure_getline() function. Finally, if gl_get_line() was
+  aborted by a signal, or any other abnormal event, the value of errno
+  which originally indicated what had happened, got zeroed by the
+  code that restored the terminal to a usable state. Thus the
+  application couldn't figure out what had caused the error, apart
+  from by looking at gl_return_status(). All of these bugs have been
+  fixed.
+
+  In the Makefile, there were a number of places where install-sh was
+  invoked without a path prefix. This has now been remedied.
+
+  A fully functional workaround for a bug in Solaris' terminal I/O
+  code has also been implemented. This bug, which only manifested
+  itself in libtecla's uncommonly used non-blocking server I/O mode,
+  caused characters entered while in normal I/O mode, between calls to
+  gl_get_line() to be invisible to the next call to gl_get_line(),
+  until the user typed at least one more key after raw terminal mode
+  was restored.
+
+  The Gnu autoconf config.guess and config.sub scripts have been
+  updated to their latest versions. Apparently the old versions that I
+  was previously using were too old to know about certain BSD ports.
+  
+Version 1.5.0:
+
+  This release includes several major new features for those using
+  gl_get_line(), shared library support in Darwin, better cross
+  compilation support, and various minor bug fixes.
+
+  The biggest new feature is the option of a non-blocking I/O mode, in
+  which gl_get_line() can safely be called from an application's
+  external event-loop to incrementally read input lines from the user.
+  This feature is documented in the gl_io_mode(3) man page.
+
+  In addition, there is now support for the definition of additional
+  word-completion action functions, which can then be bound to
+  different keys. See the documentation of the gl_completion_action()
+  function in the gl_get_line(3) man page.
+
+  Externally defined action functions can also be defined, although
+  presently they don't have write access to the input line, so they
+  are restricted to operations that display information text to the
+  terminal, or modify the environment of the calling application in
+  some way. See the documentation of the gl_register_action() function
+  in the gl_get_line(3) man page.
+
+  Some of the non-blocking I/O support functions can also be used for
+  improved signal handling in the normal blocking mode. In particular,
+  the gl_list_signals() and gl_catch_blocked() functions make it
+  easier to write reliable signal handling around gl_get_line(). The
+  new "RELIABLE SIGNAL HANDLING" section of the gl_get_line(3) man
+  page is intended as an introduction to this subject.
+
+  Programs can now clear the terminal between calls to gl_get_line(),
+  by calling the new gl_erase_terminal() function.
+
+  The gl_display_text() function, now used in the demos to display
+  introductory banners, is provided for formatting text according to
+  the width of the terminal.
+
+  It is now possible to install inactivity timeout callbacks in
+  gl_get_line(), using the new gl_inactivity_timeout() function.
+
+  The new gl_set_term_size() function allows the application to
+  explicitly set the terminal size, for cases, such as when one is
+  using a terminal at the end of a serial lineq, where the terminal
+  driver doesn't send the process a SIGWINCH when the terminal size
+  changes.
+
+  The new gl_bind_keyseq() function provides a convenient
+  alternative to gl_configure_getline(), for binding or unbinding
+  one key-sequence at a time.
+
+  gl_get_line()s signal handling, file-descriptor event-handling,
+  inactivity-timeout handling and server-mode non-blocking I/O
+  features now not only work when input is coming from a terminal, but
+  now also work when input is coming from non-interactive streams,
+  such as files and pipes.
+
+  The history implementation has been re-written to make it more
+  efficient and easier to modify. The biggest user-level change is
+  that when recalling history lines using a search prefix, the same
+  line is no longer returned more than once in a row.  Previously this
+  duplicate elimination only worked when one was recalling a line
+  without specifying a search prefix, and this was naively performed
+  by preventing neighboring duplicates from existing in the history
+  list, rather than by skipping duplicates at search time.
+
+  In previous versions of the library, when gl_get_line() and its
+  associated public functions detected invalid arguments, or couldn't
+  allocate memory, etc, error messages were written to stderr. This
+  isn't appropriate for library functions, so instead of writing such
+  messages to stderr, these messages are now recorded in buffers
+  within the affected GetLine object. The latest error message can
+  then subsequently be queried by calling gl_error_message(). The use
+  of errno has also been expanded, and a new function called
+  gl_return_status() has been provided to expand on the cause of the
+  last return from gl_get_line().
+
+  User level usage and configuration information has now been split
+  out of the gl_get_line(3) man page into a separate tecla(7) man
+  page. The enhance(3) man page has also been renamed to enhance(1).
+
+  When expanding "~/", gl_get_line() now checks for, and returns the
+  value of the HOME environment variable, if it exists, in preference
+  to looking up the directory of the current user in the password
+  file.
+
+  When the terminal was resized to a narrower width, previous versions
+  of gl_get_line() would redraw the line higher up the terminal. This
+  bug has been fixed. A bug in history recall has also been fixed, in
+  which an error message was being generated if one attempted to
+  recall a line while the cursor was at the end of the longest
+  possible input line. A more serious bug, in which callbacks
+  registered by gl_watch_fd() weren't being called for write-events,
+  has also been fixed. Finally, a few minor fixes have been made to
+  improve support under QNX and Mac OS X.
+
+  Beware that in this release, much of the underlying code has
+  undergone some radical re-work, so although backwards compatibility
+  of all documented features has been preserved, there may be some
+  lingering bugs that could break existing programs.  So, if you plan
+  to use this version in production code, please test it as far as
+  possible within your application before releasing it to your
+  clients, and as always, please report any unexpected behavior.
+
 Version 1.4.1:
 
   This is a maintenance release. It includes minor changes to support

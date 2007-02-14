@@ -8,6 +8,12 @@
 #include <unistd.h>
 #include <termios.h>
 
+#ifdef HAVE_SELECT
+#ifdef HAVE_SYS_SELECT_H
+#include <sys/select.h>
+#endif
+#endif
+
 #include <fcntl.h>
 #include <sys/time.h>
 #include <sys/types.h>

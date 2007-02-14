@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -42,6 +42,21 @@
 #include "libtecla.h"
 
 /*
+ * If the library is being built with file-system access excluded, this
+ * demo program won't have anything to demonstrate.
+ */
+#ifdef WITHOUT_FILE_SYSTEM
+int main(int argc, char *argv[])
+{
+  fprintf(stderr, "\n"
+	  "  This program normally demonstrates tecla's path-lookup\n"
+	  "  facility. However libtecla has been installed with\n"
+	  "  file-system facilities explicitly excluded, so there is\n"
+          "  nothing to demonstrate.\n\n");
+  return 1;
+}
+#else
+/*
  * Encapsulate the resources needed by this demo.
  */
 typedef struct {
@@ -73,6 +88,10 @@ static int get_word_limits(const char *string, int *wa, int *wb);
  * This is the demonstration completion callback function (defined below).
  */
 static CPL_MATCH_FN(demo_cpl_fn);
+
+/* The function which displays the introductory text of the demo */
+
+static void show_demo_introduction(GetLine *gl);
 
 /*.......................................................................
  * This demo takes no arguments. It reads lines of input until the
@@ -107,8 +126,13 @@ int main(int argc, char *argv[])
  * Lookup and display the version number of the library.
  */
   libtecla_version(&major, &minor, &micro);
-  printf("Welcome to the demo2 program of libtecla version %d.%d.%d\n",
+  printf("\n Welcome to the path-search demo of libtecla version %d.%d.%d\n",
 	 major, minor, micro);
+/*
+ * Display some introductory text, left-justifying it within the current
+ * width of the terminal and enclosing it in a box of asterixes.
+ */
+  show_demo_introduction(res->gl);
 /*
  * Read lines of input from the user and print them to stdout.
  */
@@ -350,3 +374,50 @@ static int get_word_limits(const char *string, int *wa, int *wb)
   };
   return *wa == *wb;
 }
+
+/*.......................................................................
+ * Display introductory text to the user, formatted according to the
+ * current terminal width and enclosed in a box of asterixes.
+ *
+ * Input:
+ *  gl      GetLine *   The resource object of gl_get_line().
+ */
+static void show_demo_introduction(GetLine *gl)
+{
+  int start;     /* The column in which gl_display_text() left the cursor */
+  int i;
+/*
+ * Break the indtroductory text into an array of strings, so as to
+ * avoid overflowing any compiler string limits.
+ */
+  const char *doc[] = {
+    "This program demonstrates the use of the pca_lookup_file() function ",
+    "for finding executables in the UNIX PATH. It also demonstrates ",
+    "tab completion of the names of executables found in the path. For ",
+    "example, if you type:\n\n ta\n\nthen hit the tab key, you will be ",
+    "presented with a list of executables such as tar and tail whose names ",
+    "start with the string \"ta\". If you decide to add an \"r\" to select ",
+    "the tar command, then you type return, the full pathname of the tar ",
+    "program will be printed.\n\nThe file demo2.c contains the code ",
+    "of this program, and is fully commented to enable its use as ",
+    "a working example of how to use the facilities documented in the ",
+    "pca_lookup_file man page.\n"};
+/*
+ * Form the top line of the documentation box by filling the area of
+ * the line between a " *" prefix and a "* " suffix with asterixes.
+ */
+  printf("\n");
+  gl_display_text(gl, 0, " *", "* ", '*', 80, 0, "\n");
+/*
+ * Justify the documentation text within margins of asterixes.
+ */
+  for(start=0,i=0; i<sizeof(doc)/sizeof(doc[0]) && start >= 0; i++)
+    start = gl_display_text(gl, 0, " * ", " * ", ' ', 80, start,doc[i]);
+/*
+ * Draw the bottom line of the documentation box.
+ */
+  gl_display_text(gl, 0, " *", "* ", '*', 80, 0, "\n");
+  printf("\n");
+}
+
+#endif  /* ifndef WITHOUT_FILE_SYSTEM */

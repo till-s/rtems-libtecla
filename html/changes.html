@@ -1,8 +1,1259 @@
-<HEAD><TITLE>The tecla library change log</TITLE></HEAD>
-<BODY bgcolor=add8e6><PRE>
+<html><head><title>The tecla library change log</title></head>
+<body bgcolor="#add8e6"><pre>
 In the following log, modification dates are listed using the European
 convention in which the day comes before the month (ie. DD/MM/YYYY).
 The most recent modifications are listed first.
+
+31/10/2004 mcs@astro.caltech.edu (problem reported by Godfrey van der Linden) 
+           getline.c
+             The gl_event_handler() function had the endif of a
+             conditional compilation clause in the wrong place. This
+             only upset the compiler on unusual systems that don't
+             have select(). The problem was seen under Mac OS X, due
+             to the configuration problem in 1.6.0 that caused the
+             configure script to mistakenly report that select wasn't
+             available.
+
+31/10/2004 mcs@astro.caltech.edu (info provided by Ivan Rayner)
+           configure.in configure Makefile.in
+             Ivan reported that under IRIX 6.5 it is necessary to add
+             -D_XOPEN_SOURCE=500 to the compiler flags, when compiling
+             the reentrant version of the library. Thus, whereas
+             previously I hardwired the value of DEFINES_R in
+             Makefile.in, I have now made this a variable in the
+             configure script, which is augmented with the above
+             addition, within an IRIX-specific switch clause.
+
+             Also apparently configure leaves the RANLIB variable
+             blank, instead of setting it to ":", so I have now
+             explicitly set this to ":", within the new IRIX clause of
+             the configure script.
+
+31/10/2004 mcs@astro.caltech.edu (info provided by Ivan Rayner)
+           getline.c
+             Under IRIX, the compiler warned that gl_read_unmasked()
+             was returning an int, which was then being assigned to an
+             enumeration type. This is techically fine, but it
+             highlighted the fact that I had meant to declare
+             gl_read_unmasked() to directly return the enumerated
+             type. I have now done so.
+
+26/09/2004 mcs@astro.caltech.edu
+           getline.c
+             Users can now turn off interactive command-line editing
+             by setting the TERM environment variable to the word "dumb".
+
+18/07/2004 mcs@astro.caltech.edu (problem noted by Michael MacFaden)
+           getline.c
+             Calling gl_terminal_size() on a system without support
+             for SIGWINCH caused a divide-by-zero error in an unintended
+             call to gl_erase_line(), because gl_update_size() was
+             incorrectly being called to query the terminal size,
+             instead of gl_query_size().
+
+18/07/2004 Padraig Brady  (documented here by mcs@astro.caltech.edu)
+           getline.c
+             The suspend and termination signal-handlers installed by
+             gl_tty_signals(), were being installed swapped.
+
+03/06/2004 Mike Meaney  (documented here by mcs@astro.caltech.edu)
+           getline.c
+             Mike pointed out the fact that the curses setupterm()
+             function is actually documented to exit the application
+             if an error occurs while its optional errret argument is
+             NULL. I hadn't noticed this, and because I didn't need
+             the extra information returned in the errret argument, I
+             was passing it a NULL. As suggested by Mike, I now pass
+             this argument a pointer to a dummy errret variable.
+
+23/05/2004 mcs@astro.caltech.edu (problem noted by John Beck)
+           man/func/cpl_complete_word.in
+             Some of the prototypes of functions and types documented
+             by the cpl_complete_word man page, weren't listed in the
+             Synopsis section of this man page. They are now listed
+             there.
+            
+23/05/2004 mcs@astro.caltech.edu
+           getline.c man/func/gl_get_line.in
+             I have now added support for calling gl_normal_io() from
+             any callback functions that the application installs by
+             calling either gl_inactivity_timeout(), or gl_watch_fd().
+             Previously, if one of these callback functions called
+             gl_normal_io(), then after returning to gl_get_line(),
+             gl_get_line() would incorrectly assume that the terminal
+             was still in raw I/O mode. Now, gl_get_line() checks to
+             see if gl_normal_io() was called by the callback, and
+             if so, calls _gl_raw_io() to reinstate raw I/O mode.
+
+21/05/2004 mcs@astro.caltech.edu
+           configure.in configure
+             On Mac OS X the code that the configure script used to
+             check for select() failed due to missing symbols in
+             sys/select.h. Moving the inclusion of sys/select.h to
+             after the inclusion of sys/time.h, sys/types.h and
+             sys/unistd.h fixed this.
+
+11/05/2004 mcs@astro.caltech.edu
+           getline.c man/func/gl_get_line.in
+             If the line buffer returned by one call to gl_get_line()
+             was passed as the start_line argument of the next call to
+             gl_get_line(), then instead of the just-entered line
+             being presented back to the user for further editing, the
+             start_line argument was effectively ignored, because the
+             line buffer whose pointer was being passed back, was
+             being cleared before the start_line pointer was examined.
+             This appears to have been a case of me incorrectly
+             thinking that I had forgotten to initialize gl-&gt;line[]
+             and gl-&gt;ntotal in the gl_reset_input_line() function, and
+             then "fixing" this supposed omission. Removing this
+             erroneous fix, restored things to how they were meant to
+             be. To make it unlikely that I will make the same mistake
+             again, I have renamed the function from
+             gl_reset_input_line() to gl_reset_editor(), to stop it
+             looking as though it is meant to reset the contents of
+             the input line (that is what gl_truncate_buffer() is
+             for), explicitly stated that it doesn't clear the input
+             line, in the header comments of the function, and added a
+             prominent warning comment in the body of the function.
+
+             Also, since support for passing back the returned line
+             pointer via the start_line argument of the next call to
+             gl_get_line(), wasn't documented in the man page, but was
+             meant to be supported, and definitely used to work, I
+             have now amended the man page documentation of
+             gl_get_line() to explicitly state that this feature is
+             officially supported.
+
+2?/04/2004 Released 1.6.0
+
+22/04/2004 mcs@astro.caltech.edu  (Fixed a bug reported by John Beck)
+           getline.c
+             When an error, signal, or other abnormal event aborted
+             gl_get_line(), the cleanup code that restored the
+             terminal to a sane state, also overwrote the value of
+             errno that was associated with the aborting event. An
+             I/O error occurring in the cleanup code would have also
+             overwritten the value to be returned by
+             gl_return_status(), and thus remove any possibility of
+             the caller finding out what really caused gl_get_line()
+             to abort. I have now written a new internal function
+             called, gl_record_status(), which records the completion
+             status to be returned by gl_return_status(), and the
+             value to assign to errno just before gl_get_line()
+             returns. This is called wherever code detects conditions
+             that require gl_get_line() to return early. The function
+             ensures that once an abnormal completion status has been
+             recorded for return, subsequent completions statuses
+             aren't recorded. This ensures that the caller sees the
+             original cause of the abnormal return, rather than any
+             error that occurs during cleaning up from this before
+             return.
+
+17/04/2004 mcs@astro.caltech.edu
+           getline.c
+             If an application's callback called gl_read_char() after
+             calling gl_normal_io(), it would inappropriately
+             redisplay the input line, when it called _gl_raw_io() to
+             temporarily switch the terminal back into raw mode.
+
+             To fix this, _gl_raw_io() now takes a new 'redisplay'
+             argument, which specifies whether or not to queue a
+             redisplay of the input line. I also created a new
+             gl-&gt;postpone flag, which is set by gl_normal_io(), and
+             cleared by _gl_raw_io() (when its redisplay argument is
+             true). When this flag is set, gl_flush_output() ignores
+             queued redisplays, as it generally should between calls
+             to gl_normal_io() and gl_raw_io(). Thus its effect is to
+             postpone redisplays while line editing is suspended.
+
+11/04/2004 mcs@astro.caltech.edu
+           history.c man/misc/tecla.in
+             History searches can now include the globbing operators
+             *, ?, []. When a search prefix is found to have at least
+             one of these characters, then only history lines that
+             completely match that pattern are returned.
+
+11/04/2004 mcs@astro.caltech.edu  (issue raised by Mark Coiley)
+           getline.c ioutil.c
+             There appears to be a bug in Solaris's terminal I/O.
+             When the terminal file descriptor is placed in
+             non-blocking I/O mode, and the terminal is switched from
+             canonical to raw mode, characters that were previously
+             entered in canonical I/O mode don't become available to
+             be read until the user types one character more. Select()
+             incorrectly says that there are no characters available,
+             and read() returns EAGAIN. This is only a problem for
+             gl_get_line() when gl_get_line() is in non-blocking
+             server I/O mode, so most users won't have experienced any
+             problems with this.
+
+             The only way that I have found to get read() to return
+             the characters, without the user first having to type
+             another character, is to turn off non-blocking I/O before
+             calling read(). Select() still claims that there are no
+             characters available to be read, but read happily returns
+             them anyway. Fortunately, one can perform non-blocking
+             terminal reads without setting the non-blocking I/O flag
+             of the file descriptor, simply by setting the VTIME
+             terminal attribute to zero (which I already was
+             doing). Thus, when in non-blocking server I/O, I now turn
+             off the non-blocking I/O flag, attempt to read one
+             character and only if this fails, do I then call the
+             select() based event handler to implement any configured
+             non-zero timeout, before attempting the read again. Of
+             course the non-blocking I/O flag is still needed for
+             writing, so I only turn it off temporarily while reading.
+
+25/03/2004 mcs@astro.caltech.edu  (bug reported by Gregory Harris)
+           Makefile.in
+             It appears that when in February, I patched Makefile.in
+             to add abolute paths to the install-sh shell-script,
+             I accidentally replaced install-sh with install.sh. I
+             corrected the name in the Makefile.
+
+25/03/2004 Gregory Harris  (documented here by mcs)
+           configure.in configure
+             Greg added the configuration parameters needed to build
+             the shared version of the libtecla library under FreeBSD.
+
+25/03/2004 mcs@astro.caltech.edu
+           getline.c libtecla.h libtecla.map man/func/gl_get_line.in
+           man/func/gl_read_char.in
+             I wrote a public function called gl_read_char(). Unlike
+             gl_query_char(), this function neither prompts the user
+             for input, nor displays the character that was entered.
+             In fact it doesn't write anything to the terminal, and
+             takes pains not to disturb any incompletely entered
+             input line, and can safely be called from application
+             callback functions.
+
+21/03/2004 mcs@astro.caltech.edu
+           getline.c libtecla.h libtecla.map man/func/gl_get_line.in
+           man/func/gl_query_char.in
+             I wrote a public function called gl_query_char(), which
+             prompts the user and awaits a single-character reply,
+             without the user having to hit return.
+
+23/02/2004 mcs@astro.caltech.edu (bug reported by Gregory Harris)
+           configure.in configure getline.c enhance.c demo3.c
+             The configure script now checks for the sys/select.h
+             header file, and arranges for a C macro called
+             HAVE_SYS_SELECT_H to be set if it exists. Thus the files
+             that use select() now use this macro to conditionally
+             include sys/select.h where available. Apparently this
+             header is required under FreeBSD 5.1.
+
+23/02/2004 mcs@astro.caltech.edu
+           getline.c libtecla.h man/func/gl_get_line.in
+             I wrote two new public functions, gl_append_history() and
+             gl_automatic_history(). Together these allow the
+             application to take over the responsibility of adding
+             lines to the history list from gl_get_line(). I then
+             documented their functionality in the gl_get_line man
+             page.
+           Version 1.6.0
+             I incremented the minor version number of the library, to
+             comply with the requirement to do so when additions are
+             made to the public interface. See libtecla.map for
+             details.
+           libtecla.map
+             I added a new 1.6.0 group for the new minor version, and
+             added the above pair of functions to it.
+
+15/02/2004 mcs@astro.caltech.edu (fixes a bug reported by Satya Sahoo)
+           history.c
+             Calling gl_load_history() multiple times, eventually led
+             to a segmentation fault. This was due to the head of the
+             list of unused history string segments not getting
+             reset when the history buffer was cleared. While
+             debugging this problem I also noticed that the history
+             resizing function was way too complicated to verify, so
+             after fixing the above bug, I heavily simplified the
+             history resizing function, trading off a small reduction
+             in memory efficiency, for greatly improved clarity, and
+             thus made it much more verifiable and maintainable.
+
+14/02/2004 mcs@astro.caltech.edu (fixes a bug reported by Tim Burress).
+           getline.c
+             If gl_change_terminal() was first used to tell
+             gl_get_line to read input from a file, then called later
+             to tell it to read subsequent input from a terminal, no
+             prompt would be displayed for the first line of
+             interactive input. The problem was that on reaching the
+             end of the input file, gl_get_line() should have called
+             gl_abandon_line(), to tell the next call to gl_get_line()
+             to start inputting a new line from scratch. I have added
+             this now.
+
+14/02/2004 Krister Walfridsson (documented here by mcs@astro.caltech.edu)
+           Makefile.in
+             Krister noticed that I had failed to put $(srcdir)/ in front
+             of some invokations of install.sh. I have remedied this.
+           config.guess config.sub
+             I hadn't updated these for a long time, so apparently they
+             didn't recognise the BSD system that Krister was using.
+             I have now updated them to the versions that come with
+             autoconf-2.59. 
+
+22/01/2004 mcs@astro.caltech.edu
+           keytab.c
+             When parsing key-binding specifications, backslash escaped
+             characters following ^ characters were not being expanded.
+             Thus ^\\ got interpretted as a control-\ character followed
+             by a \ character, rather than simply as a control-\
+             character.
+
+12/01/2004 mcs@astro.caltech.edu
+           cplfile.c cplmatch.c demo2.c demo3.c demo.c direader.c
+           expand.c getline.c history.c homedir.c pathutil.c pcache.c
+           configure.in configure INSTALL
+             The configuration script now takes a
+             "--without-file-system" argument. This is primarily for
+             intended for embedded systems that either don't have
+             filesystems, or where the file-system code in libtecla is
+             unwanted bloat. It sets the WITHOUT_FILE_SYSTEM
+             macro. This removes all code related to filesystem
+             access, including the entire public file-expansion,
+             file-completion and path-lookup facilities. Note that the
+             general word completion facility is still included, but
+             without the normally bundled file completion
+             callback. Actually the callback is still there, but it
+             reports no completions, regardless of what string you ask
+             it to complete.
+
+             This option is described in the INSTALL document.
+
+12/01/2004 mcs@astro.caltech.edu
+           getline.c configure.in configure INSTALL
+             The configuration script now takes a
+             "--without-file-actions" argument. This allows an
+             application author/installer to prevent users of
+             gl_get_line() from accessing the filesystem from the
+             builtin actions of gl_get_line(). It defines a macro
+             called HIDE_FILE_SYSTEM. This causes the
+             "expand-filename", "read-from-file", "read-init-files",
+             and "list-glob" action functions to be completely
+             removed. It also changes the default behavior of actions
+             such as "complete-word" and "list-or-eof" to show no
+             completions, instead of the normal default of showing
+             filename completions.
+
+             This option is described in the INSTALL document.
+
+11/01/2004 mcs@astro.caltech.edu
+           getline.c man/func/gl_get_line.in
+             In case an application's customized completion handler
+             needs to write to the terminal for some unforseen reason,
+             there needs to be a way for the it to cleanly suspend raw
+             line editing, before writing to the terminal, and the
+             caller then needs to be aware that it may need to
+             resurrect the input line when the callback returns. I
+             have now arranged that the completion callback functions
+             can call the gl_normal_io() function for this purpose,
+             and documented this in the gl_get_line() man page.
+
+11/01/2004 mcs@astro.caltech.edu  (In response to a bug report by Satya Sahoo)
+           getline.c
+             The gl_configure_getline() function makes a malloc'd copy
+             of the names of the configuration files that it is asked
+             to read. Before the bug fix, if the application made one
+             or more calls to this function, the memory allocated by
+             the final call that it made before calling del_GetLine(),
+             wasn't being freed. Note that memory allocated in all but
+             the final call was being correctly freed, so the maximum
+             extent of the memory leak was the length of the file
+             name(s) passed in the final call to
+             gl_configure_getline(), and an application that didn't
+             call gl_configure_getline() didn't suffer any leak.
+
+20/12/2003 mcs@astro.caltech.edu
+           history.c
+             Ellen tested the history fix that I reported below, and
+             pointed out that it still had a problem. This turned out
+             to be because getline.c was making some incorrect
+             assumptions about the new behavior of history.c. This
+             problem and the previous one both revolved around how
+             search prefixes were stored and discarded, so I have now
+             re-written this part of the code. Previously the search
+             prefix was retained by looking for a line with that
+             prefix, and keeping a pointer to that line. This saved
+             memory, compared to storing a separate copy of the
+             prefix, but it led to all kinds of hairy
+             interdependencies, so I have now changed the code to keep
+             a separate copy of search prefixes. To keep the memory
+             requirements constant, the search prefix is stored in the
+             history buffer, like normal history lines, but not
+             referenced by the time-ordered history list. The prefix
+             can now be kept around indefinitely, until a new search
+             prefix is specified, regardless of changes to the
+             archived lines in the history buffer. This is actually
+             necessary to make the vi-mode re-search actions work
+             correctly. In particular, I no longer discard the search
+             prefix whenever a history search session ends. Also,
+             rather than have getline.c keep its own record of when a
+             history session is in progress, it now consults
+             history.c, so that failed assumptions can't cause the
+             kind of discrepancy that occurred before. For this to
+             work, getline.c now explicitly tells history.c to cancel
+             search sessions whenever it executes any non-history
+             action.
+
+14/12/2003 mcs@astro.caltech.edu (bug reported by Ellen Oschmann)
+           history.c
+             If one searched backwards for a prefix, then returned to
+             the original line, changed that line, then started
+             another backwards prefix search, getline incorrectly
+             discarded the new search prefix in the process of
+             throwing away its cached copy of the previous pre-search
+             input line. In other words getline was belatedly
+             cancelling a previous search, after a new search had
+             already partially begun, and thus messed up the new
+             search. The obvious fix was to arrange for the current
+             search to be cancelled whenever the history pointer
+             returns to its starting point, rather than waiting for
+             the next search to begin from there.
+
+14/12/2003 mcs@astro.caltech.edu
+           history.c
+             _glh_recall_line() was returning the last line in the
+             history buffer instead of the line requested by the
+             caller. This only affected the obscure "repeat-history"
+             action-function, which probably isn't used by anybody.
+
+09/12/2003 Version 1.5.0 released.
+
+28/09/2003 mcs@astro.caltech.edu
+           homedir.c
+             When the home directory of the login user is requested,
+             see if the HOME environment variable exists, and if so
+             return its value, rather than looking up the user's home
+             directory in the password file. This seems to be the
+             convention adopted by other unix programs that perform
+             tilde expansion, and it works around a strange problem,
+             where a third-party libtecla program, statically compiled
+             under an old version of RedHat, unexpectedly complained
+             that getpwd() returned an error when the program was run
+             under RedHat 9.
+
+01/09/2003 mcs@astro.caltech.edu
+           getline.c libtecla.h libtecla.map man/func/gl_get_line.in
+           man/func/gl_register_action.in.
+             It is now possible for an application to register
+             external functions as action functions. These actions are
+             initially bound to specified key-sequences, but if they
+             are registered before the user's configuration file is
+             loaded, they can also be re-bound by the user to
+             different key-sequences. The function used to register a
+             new action, is called gl_register_action().  Action
+             functions are passed a readonly copy of the input line
+             and the cursor position. They can display text to the
+             terminal, or perform other operations on the application
+             environment. Currently, they can't edit the input line or
+             move the cursor. This will require the future addition of
+             functions to queue the invokation of the built-in action
+             functions.
+
+26/08/2003 mcs@astro.caltech.edu
+           getline.c
+             I modified gl_update_buffer() to ensure that the cursor
+             stays within the input line after external line
+             modifications, and to queue a redisplay of the
+             potentially modified input line.
+
+21/07/2003 mcs@astro.caltech.edu
+           configure.in configure Makefile.in Makefile.stub INSTALL
+             By specifying --without-man-pages or --with-man-pages=no
+             as command-line arguments to the configure script, it is
+             now possible to have the configure script skip the
+             man-page preprocessing step, and arrange for the man-page
+             installation targets in the Makefile to do nothing. This
+             option is designed for people who embed libtecla within
+             other packages. It is also used by Makefile.stub when
+             the distclean target is specified.
+
+21/07/2003 mcs@astro.caltech.edu
+           configure.in configure
+             The previous workaround for recent versions of gcc
+             placing /usr/local/include at the start of the system
+             inlcude-file search path, broke something else.  The fix
+             placed /usr/include before gcc's include area, which
+             meant that gcc's modified version of stdarg.h was being
+             ignored in deference to the version in /usr/include. I
+             have changed the fix to have gcc report the search path,
+             then have awk add options to CFLAGS to reorder this path,
+             plaing /usr/local/include at the end.
+
+             Also, under Solaris 9, including term.h without first
+             including curses.h results in complaints about undefined
+             symbols, such as bool. As a result the configure script's
+             test for term.h was failing. I have now modified it to
+             include curses.h in the test code that it uses to check
+             for term.h. In the process I also improved the tests for
+             curses.h and term.h to prevent an ncurses version of
+             term.h from being used with the system-default version of
+             curses.h.
+
+29/06/2003 mcs@astro.caltech.edu
+           Makefile.in direader.c homedir.c
+             On some systems (eg. linux) the _POSIX_C_SOURCE
+             feature-test macro is set by system headers, rather than
+             being an option set by a project's Makefile at
+             compilation time.  In software, such as tecla, where the
+             definition of this macro is used as an indication of
+             whether to use the non-reentrant or reentrant versions of
+             system functions, this means that the reentrant functions
+             are always used, regardless of whether this macro is set
+             or not by the project Makefile. Thus, on such systems the
+             reentrant and non-reentrant versions of the tecla library
+             are essentially identical. This has a couple of
+             drawbacks.  First, since thread-safe functions for
+             traversing the password file don't exist, the supposedly
+             non-reentrant version of the tecla library can't support
+             ambiguous tab-completion of usernames in ~username/
+             constructions. Secondly, on some systems the use of
+             reentrant system functions dictates the use of a shared
+             library that isn't needed for the non-reentrant
+             functions, thus making it more difficult to distribute
+             binary versions of the library.
+
+             To remedy this situation I have modified the DEFINES_R
+             variable in Makefile.in to arrange for the compiler to
+             define a C macro called PREFER_REENTRANT when it is
+             compiling the reentrant version of the tecla library.
+             This macro is now used in the source code to determine
+             when to require reentrant code. Whithin the source code,
+             wherever a potentially non-reentrant interface is used,
+             the existance of both this macro and a suitably valued
+             _POSIX_C_SOURCE macro, are tested for to see if a
+             reentrant alternative to the problem code should be used.
+
+22/06/2003 mcs@astro.caltech.edu
+           getline.c
+             I changed the way that redisplays are requested and
+             performed.  Redisplays are now queued by calling
+             gl_queue_redisplay(), and subsequently performed by
+             gl_flush_output(), when the queue of already pending
+             output has been completely dispatched. This was necessary
+             to prevent event handlers from filling up the output
+             queue with redisplays, and it also simplifies a number of
+             things. In the process I removed the gl_queue_display()
+             function. I also wrote a gl_line_erased() function, which
+             is now called by all functions that erase the input
+             line. I also split the gl_abandon_line() function into
+             public and private callable parts, and used the private
+             version internally to arrange to discard the input line
+             after errors.
+
+             The raw_mode flag was not being initialized by new_GetLine().
+             It is now initialized to zero.
+
+             I removed the zapline flag, since using the endline flag to
+             communicate the desire to terminate the line, did the same
+             thing.
+
+             gl_terminal_move_cursor() now does nothing when the input
+             line isn't displayed.
+
+18/03/2003 mcs@astro.caltech.edu
+           getline.c
+             Fixed bug which was causing newlines not to be output
+             at the end of each newly entered line. I was
+             interpreting the gl-&gt;endline flag in conflicting ways in
+             two places. To fix this I have created a gl-&gt;displayed
+             flag. This flags whether an input line is currently
+             displayed.
+
+17/03/2003 mcs@astro.caltech.edu
+           getline.c libtecla.h man/func/gl_get_line.in
+           man/func/gl_erase_terminal.in libtecla.map
+             I added a new function that programs can call to clear
+             the terminal between calls to gl_get_line().
+
+11/03/2003 mcs@astro.caltech.edu
+           configure.in configure
+             Under linux when _POSIX_C_SOURCE is defined, getpwent()
+             and associated functions become undefined, because
+             _SVID_SOURCE and _BSD_SOURCE become undefined. Adding
+             these feature macros back to CFLAGS resolves this.
+
+06/03/2003 mcs@astro.caltech.edu
+           getline.c libtecla.map man/func/gl_get_line.in
+             Following the lead of Edward Chien, I wrote a function
+             called gl_bind_keyseq(), which binds a specified
+             key-sequence to a given action, or unbinds the
+             key-sequence.
+
+24/02/2003 mcs@astro.caltech.edu
+           getline.c libtecla.map man/func/cpl_complete_word.in
+             I implemented a simple function called
+             cpl_recall_matches().  This recalls the return value of
+             the last call to cpl_complete_word().
+
+19/01/2003 mcs@astro.caltech.edu
+           getline.c
+             The documented signal handling, fd event-handling,
+             inactivity timeout handling, and server-mode non-blocking
+             I/O features are now implemented for non-interactive
+             input streams, such as pipes and files.
+
+19/01/2003 mcs@astro.caltech.edu
+           getline.c libtecla.h man/func/gl_get_line.in demo3.c
+             I added a new return status enumerator to report
+             when an end-of-file condition causes gl_get_line()
+             to return NULL.
+
+13/01/2003 mcs@astro.caltech.edu
+           history.c
+             I rewrote the history facility. The previous
+             circular buffer implementation was a nightmare to change,
+             and it couldn't efficiently support certain newly
+             requested features. The new implementation stores history
+             lines in linked lists of fixed sized string segments,
+             taken from the buffer, with each line being reference
+             counted and recorded in a hash table. If the user enters
+             a line multiple times, only one copy of the line is now
+             stored. Not only does this make better use of the
+             available buffer space, but it also makes it easy to
+             ensure that a line whose prefix matches the current
+             search prefix, isn't returned more than once in sequence,
+             since we can simply see if the latest search result has
+             the same hash-table pointer as the previous one, rather
+             than having to compare strings. Another plus is that due
+             to the use of linked lists of nodes of fixed size line
+             segments, there is no longer any need to continually
+             shuffle the contents of the buffer in order to defragment
+             it. As far as the user is concerned, the visible
+             differences are as follows:
+
+             1. If the user enters a given line multiple times in a
+                row, each one will be recorded in the history list,
+                and will thus be listed by gl_show_history(), and
+                saved in the history file. Previously only one line
+                was recorded when consecutive duplicates were entered.
+                This was a kludge to prevent history recall from
+                recalling the same line multiple times in a row. This
+                only achieved the desired result when not recalling by
+                prefix.
+
+             2. Not only simple recall, but prefix-based history line
+                recalls now don't return the same line multiple times
+                in a row. As mentioned in (1) above, previously this
+                only worked when performing a simple recall, without a
+                search prefix.
+
+28/12/2002 mcs@astro.caltech.edu
+           getline.c
+             The one-line function, gl_buff_curpos_to_term_curpos()
+             was only being used by gl_place_cursor(), so I inlined it
+             in that function, and removed it.
+
+28/12/2002 mcs@astro.caltech.edu
+           getline.c
+             gl_suspend_process() was calling the application-level
+             gl_normal_io() and gl_raw_io() functions, where it should
+             have been calling the internal versions _gl_normal_io()
+             and _gl_raw_io().
+             Also gl_handle_signal() was masking and unmasking just
+             the signals of the first element of the gl[] array
+             argument. It now masks and unmasks all trappable signals.
+
+28/12/2002 mcs@astro.caltech.edu
+           getline.c
+             Now that the number of terminal characters used to
+             display the current input line, is recorded, the relative
+             line on which the last character of the input line
+             resides can be determined without having to call
+             gl_buff_curpos_to_term_curpos(). This is now used by
+             gl_normal_io() via gl_start_newline(), so there is now no
+             need for gl_buff_curpos_to_term_curpos() to be
+             async-signal safe. I have thus removed the annoying
+             gl-&gt;cwidth[] array, and gl_buff_curpos_to_term_curpos()
+             now calls gl_width_of_char() directly again. There is
+             also now no need for the gl_line_of_char_start() and
+             gl_line_of_char_end() functions, so I have removed them.
+
+28/12/2002 mcs@astro.caltech.edu
+           getline.c
+             Unfortunately it turns out that the terminfo/termcap
+             control sequence which is defined to delete everything
+             from the current position to the end of the terminal, is
+             only defined to work when at the start of a terminal
+             line. In gnome terminals in RedHat 8.0, if it is used
+             within a terminal line, it erases the whole terminal
+             line, rather than just what follows the cursor. Thus to
+             portably truncate the displayed input line it is
+             necessary to first use the control sequence which deletes
+             from the cursor position to the end of the line, then if
+             there are more terminal lines, move to the start of the
+             next line, and use the delete to end-of-terminal control
+             sequence, then restore the cursor position. This requires
+             that one know how many physical terminal lines are used
+             by the current input line, so I now keep a record of the
+             number of characters so far displayed to the terminal
+             following the start of the prompt, and the new
+             gl_truncate_display() function uses this information to
+             truncate the displayed input line from the current cursor
+             position.
+
+28/12/2002 mcs@astro.caltech.edu
+           getline.c
+             gl_start_newline() now moves to an empty line following
+             the input line, rather than just to the next line. It
+             also arranges for the input line to be redisplayed before
+             editing resumes. A major user of this is gl_print_info(),
+             which now need not be followed by an explicit call to
+             gl_redisplay(), since the terminal input loop in
+             gl_get_input_line() ensures that gl_redisplay() is called
+             after any action function that asserts gl-&gt;redisplay.
+             Also, all functions that erase the displayed input line
+             can now call the gl_erase_line() function, which is
+             designed to work correctly even when a terminal resize
+             invalidates the horizontal cursor position.  Finally, the
+             new gl_queue_display() function is now used by functions
+             that need to arrange for the input line to be displayed
+             from scratch after the displayed line has been erased or
+             invalidated by other text being written to the terminal.
+             All of these changes are aimed at reducing the number of
+             places that directly modify gl-&gt;term_curpos and
+             gl-&gt;redisplay.
+
+22/12/2002 Markus Gyger   (logged here by mcs)
+           Makefile.in update_html
+	     In places where echo and sed were being used to extract
+	     the base names of files, Markus substituted the basename
+	     command. He also replaced explicit cp and chmod commands
+	     with invokations of the install-sh script.
+           configure.in
+             Use $target_os and $target_cpu, where appropriate,
+	     instead of $target.
+           configure.in
+             The Solaris man function and library man pages should
+	     be in sections 3lib and 3tecla respectively, only in
+	     Solaris version 2.8 and above.
+           configure.in
+             Markus provided values for the man page configuration
+             variables for HPUX.
+           man/*/*.in
+             I had missed parameterizing man page section numbers in
+	     the man page titles, Markus corrected this.
+           man/func/libtecla_version.in
+             Fixed incorrect section number in the link to the
+             libtecla man page.
+           homedir.c
+             When compiled to be reentrant, although one can't use the
+	     non-reentrant getpwent() function to scan the password
+	     file for username completions, one can at least see if
+	     the prefix being completed is a valid username, and if
+	     the username of the current user minimally matches the
+	     prefix, and if so list them. I simplified Markus'
+	     modification by adding a prefix argument to the
+             _hd_scan_user_home_dirs() function, and redefining the
+	     function description accordingly, such that now it
+	     reports only those password file entries who's usernames
+	     minimally match the specified prefix. Without this, it
+	     would have been necessary to peak inside the private data
+	     argument passed in by cf_complete_username().
+             Markus also provided code which under Solaris uses the
+             non-reentrant interfaces if the reentrant version of the
+             library isn't linked with the threads library.
+
+19/12/2002 mcs@astro.caltech.edu
+           Makefile.in
+             Markus pointed out that LDFLAGS was being picked up by
+             the configure script, but not then being interpolated
+             into te Makefile. I have thus added the necessary
+             assignment to Makefile.in and arranged for the value of
+             LDFLAGS to be passed on to recursive make's. I also did
+             the same for CPPFLAGS, which had also been omitted.
+
+18/12/2002 mcs@astro.caltech.edu
+           man/* man/*/* configure.in configure Makefile.in
+           update_html
+             It turns out that the assignment of man page sections to
+             topics differs somewhat from system to system, so this is
+             another thing that needs to be configured by the main
+             configuration script, rather than being hardwired. All
+             man pages have now been moved into suitably named
+             topic-specific sub-directories of the top-level man
+             directory, and instead of having a numeric suffix, now
+             have the .in suffix, since they are now preprocessed by
+             the configure script, in the same fashion as Makefile.in.
+             Whithin these *.in versions of the man pages, and within
+             Makefile.in, the installation subdirectory (eg. man1) and
+             the file-name suffix (eg. 1), are written using
+             configuration macros, so that they get expanded to the
+             appropriate tokens when the configure script is run. In
+             principle, the man pages could also take advantage of
+             other configuration macros, such as the one which expands
+             to the library installation directory, to include full
+             path names to installed files in the documentation, so in
+             the future this feature could have more uses than just
+             that of parameterizing man page sections.
+
+18/12/2002 mcs@astro.caltech.edu
+           man3 man3/* Makefile.in html/index.html update_html
+             Markus suggested splitting the gl_get_line(3) man page
+             into user and developer sections, and also pointed out
+             that the enhance man page should be in section 1, not
+             section 3. I have thus created a top-level man
+             directory in which to place the various sections, and
+             moved the man3 directory into it. The enhance.3 man page
+             is now in man/man1/enhance.1. I have extracted all
+             user-oriented sections from the gl_get_line(3) man page
+             and placed them in a new man7/tecla.7 man page.
+
+18/12/2002 mcs@astro.caltech.edu
+           getline.c
+             Terminal resizing was broken in normal mode, due to
+             me forcing the terminal cursor position to zero in the
+             wrong place in gl_check_caught_signal().
+
+14/12/2002 Markus Gyger  (logged here by mcs)
+           configure.in configure
+             Under Solaris, recent versions of gcc search
+             /usr/local/include for header files before the system
+             directories. This caused a problem if ncurses was
+             installed under Solaris, since the termcap.h include file
+             in /usr/local/include ended up being used at compile
+             time, whereas the system default version of the curses
+             library was used at link time. Since the two libraries
+             declare tputs() differently, this evoked a complaint from
+             gcc. Markus came up with a way to force Gnu cpp to move
+             /usr/local/include to the end of the system-include-file
+             search path, where it belongs.
+
+13/12/2002 mcs@astro.caltech.edu
+           man3/gl_io_mode.3
+             I rewrote the man page which documents the new non-blocking
+             server I/O mode.
+
+12/12/2002 mcs@astro.caltech.edu
+           demo3.c
+             I wrote a new version of demo3.c, using signal handlers
+             that call gl_handle_signal() and gl_abandon_line(), where
+             previously in this demo, these functions were called from
+             the application code.
+
+05/12/2002 mcs@astro.caltech.edu
+           getline.c
+             gl_normal_io(), gl_raw_io() and gl_handle_signal() and
+             gl_abandon_line() are now signal safe, provided that
+             signal handlers that call them are installed with sa_mask's
+             that block all other signals who's handlers call them.
+             This is the case if gl_tty_signals() is used to install
+             signal handlers that call any of these functions.
+
+             A major stumbling block that had to be overcome was that
+             gl_displayed_char_width() calls isprint(), which can't
+             safely be called from a signal handler (eg. under linux,
+             the is*() functions all use thread-specific data
+             facilities to support per-thread locales, and the
+             thread-specific data facilities aren't signal safe). To
+             work around this, all functions that modify the
+             input-line buffer, now do so via accessor functions which
+             also maintain a parallel array of character widths, for
+             use by gl_buff_curpos_to_term_curpos() in place of
+             gl_displayed_char_width(). Other minor problems were the
+             need to avoid tputs(), who's signal safety isn't defined.
+
+05/12/2002 Eric Norum        (logged here by mcs@astro.caltech.edu)
+           configure.in
+             Eric provided the configuration information needed
+             to build shared libraries under Darwin (Max OS X).
+
+05/12/2002 Richard Mlynarik  (logged here by mcs@astro.caltech.edu)
+           configure.in
+             AC_PROG_RANLIB gets the wrong version of ranlib when
+             cross compiling, so has now been replaced by an
+             invokation of AC_CHECK_TOOL. In addition, AC_CHECK_TOOL
+             is also now used to find an appropriate version of LD.
+
+05/12/2002 mcs@astro.caltech.edu (based on patch by Pankaj Rathore)
+           getline.c libtecla.h libtecla.map man3/gl_get_line.3
+             The new gl_set_term_size() function provides a way
+             to tell gl_get_line() about changes in the size of
+             the terminal in cases where the values returned by
+             ioctl(TIOCGWINSZ) isn't correct.
+
+05/12/2002 mcs@astro.caltech.edu
+           getline.c
+             Rather than calling sprintf() to see how much space would
+             be needed to print a given number in octal, I wrote a
+             gl_octal_width() function, for use by
+             gl_displayed_char_width().  This makes the latter
+             function async signal safe.
+
+05/12/2002 mcs@astro.caltech.edu
+           chrqueue.c
+             Whenever the buffer is exhausted, and getting a new
+             buffer node would require a call to malloc(), attempt
+             to flush the buffer to the terminal. In blocking I/O
+             mode this means that the buffer never grows. In
+             non-blocking I/O mode, it just helps keep the buffer
+             size down.
+
+05/12/2002 mcs@astro.caltech.edu
+           freelist.h freelist.c
+             The new _idle_FreeListNodes() function queries the
+             number of nodes in the freelist which aren't currently
+             in use.
+
+05/12/2002 mcs@astro.caltech.edu
+           Makefile.stub
+             This now accepts all of the targets that the configured
+             makefile does, and after configuring the latter makefile,
+             it invokes it with the same options.
+
+03/12/2002 mcs@astro.caltech.edu
+           mans3/gl_io_mode.3
+             I completed the man page for all of the new functions
+             related to non-blocking I/O.
+
+01/12/2002 mcs@astro.caltech.edu
+           man3/gl_get_line.3
+             I wrote a long section on reliable signal handling,
+             explaining how gl_get_line() does this, how to make
+             use of this in a program, and how to handle signals
+             reliably when faced with other blocking functions.
+             This basically documents what I have learnt about
+             signal handling while working on this library.
+
+01/12/2002 mcs@astro.caltech.edu
+           getline.c man3/gl_get_line.3
+             In non-blocking server mode, the gl_replace_prompt()
+             function can now be used between calls to gl_get_line()
+             if the application wants to change the prompt of the
+             line that is being edited.
+
+01/12/2002 mcs@astro.caltech.edu
+           man3/gl_get_line.3
+             I documented the new gl_return_status() and
+             gl_error_message() functions.
+
+01/12/2002 mcs@astro.caltech.edu
+           getline.c man3/gl_get_line.3
+             Added SIGPOLL and SIGXFSZ to the list of signals that
+             are trapped by default. These are process termination
+             signals, so the terminal needs to be restored to a
+             usable state before they terminate the process.
+
+27/11/2002 mcs@astro.caltech.edu
+           getline.c libtecla.h
+             Completed the essential changes needed to support
+             non-blocking server-I/O mode.
+
+             The new gl_io_mode() function allows one to switch to
+             and from non-blocking server-I/O mode.
+
+             The new gl_raw_io() function is used in non-blocking
+             server-I/O mode to switch the terminal into non-blocking
+             raw I/O mode.
+
+             The new gl_normal_io() function is used in non-blocking
+             server-I/O mode to switch the restore the terminal to
+             a normal, blocking state. This is used to suspend line
+             input before suspending the process or writing messages
+             to the terminal.
+
+             The new gl_tty_signals() function installs specified
+             signals handlers for all signals that suspend, terminate
+             or resume processes, and also for signals that indicate
+             that the terminal has been resized. This not only saves
+             the application from having to keep its own ifdef'd list
+             of such signals, of which there are many, but it also
+             makes sure that these signal handlers are registered
+             correctly. This includes using the sa_mask member of each
+             sigaction structure to ensure that only one of these
+             handlers runs at a time. This is essential to avoid the
+             signal handlers all trying to simultaneously modify
+             shared global data.
+
+             The new gl_handle_signal() function is provided for
+             responding (from application level) to signals caught by
+             the application. It handles process suspension, process
+             termination and terminal resize signals.
+
+             The new gl_pending_io() function tells the application
+             what direction of I/O gl_get_line() is currently waiting
+             for.
+
+             In non-blocking server I/O mode, the new
+             gl_abandon_line() function can be called between calls to
+             gl_get_line() to discard an input line and force the next
+             call to gl_get_line() to start the input of a new line.
+
+             Also, in non-blocking server-I/O gl_get_line() doesn't
+             attempt to do anything but return when one of the signals
+             that it is configured to catch is caught. This is
+             necessary because when in this mode, the application is
+             required to handle these signals when gl_get_line() is
+             running, and the default configuration of most of these
+             signals in gl_get_line() is to restore the terminal then
+             call the application signal handlers. This would be a
+             case of too many cooks spoiling the broth, so in this
+             mode, gl_get_line() always defers to the application's
+             signal handlers.
+             
+26/11/2002 mcs@astro.caltech.edu
+           getline.c libtecla.h
+             I implemented a couple of new functions to support
+             reliable signal handling, as now documented
+             (see above) in the gl_get_line(3) man page.
+
+             The new gl_catch_blocked() function tells gl_get_line()
+             to unblock all configured signals around calls to
+             long-running functions, not only those that aren't
+             blocked when gl_get_line() is called. This allows
+             the caller to implement reliable signal handling,
+             since the unblocking is only done from within code
+             protected by sigsetjmp(), which avoids race conditions.
+
+             The new gl_list_signals() function fills a provided
+             sigset_t with the set of signals that gl_get_line() is
+             currently configured to catch. This allows callers to
+             block said signals, such that they are only unblocked by
+             gl_get_line() when it is waiting for I/O. When used in
+             conjunction with the gl_catch_blocked() function, this
+             removes the potential for race conditions.
+
+             Also, when gl_get_line() installs its signal handler,
+             it uses the sa_mask member of the sigaction structure
+             to ensure that only one instance of this signal handler
+             will ever be executing at a time.
+
+25/11/2002 mcs@astro.caltech.edu (bug reported by Pankaj Rathore)
+           getline.c
+             When any history recall action was invoked when the
+             input line buffer was full, an error message would be
+             displayed complaining about the length of the string
+             in the line input buffer being inconsistent with the
+             specified allocated size. This was because instead of
+             sending the allocated size of the input line, I was
+             sending the length excluding the element that is
+             reserved for the '\0' terminator. Sending it the
+             correct size corrected the problem.
+
+24/11/2002 mcs@astro.caltech.edu
+           getline.c
+             All public functions which take GetLine objects as
+             arguments now block signals on entry and restore the
+             signal mask on return. This was an attempt to make it
+             safe to call getline functions from signal handlers, but
+             the fact is that the functions that I really wanted this
+             to apply to, potentially call malloc(), so this currently
+             isn't the case.
+
+23/11/2002 mcs@astro.caltech.edu
+           getline.c libtecla.h
+             The new gl_return_status() function returns an enumerated
+             return status which can be used to query what caused
+             gl_get_line() to return.
+
+22/11/2002 mcs@astro.caltech.edu
+           Most existing .c and .h files, plus errmsg.c errmsg.h
+           Makefile.rules
+             Until now, many library functions would report error
+             messages to stderr. This isn't appropriate for library
+             functions, so in place of this behavior, error messages
+             are now recorded in internal ErrMsg objects, and passed
+             between modules via new module-specific error querying
+             functions. In addition, errno is now set appropriately.
+             Thus when gl_get_line() and related functions return an
+             error, strerror() can be used to look up system errors,
+             and gl_error_message() can be used to recover a higher level
+             error message. Note that error messages that are
+             responses to user actions continue to be reported to the
+             terminal, as before.
+
+21/11/2002 mcs@astro.caltech.edu
+           getline.c keytab.h keytab.c Makefile.rules
+             I wrote a new version of _kt_lookup_binding() that didn't
+             require the caller to have access to the innards of a
+             KeyTab object. This then enabled me to move the definition
+             of KeyTab objects into keytab.c and make the typedef in
+             keytab.h opaque. Many nested includes were also moved from
+             keytab.h into keytab.c.
+
+05/11/2002 mcs@astro.caltech.edu
+           getline.c libtecla.map libtecla.h demo3.c
+             I split the old gl_resize_terminal() function into
+             two parts, gl_query_size() and gl_update_size(), with
+             the latter calling the former to get the new terminal
+             size.
+
+05/11/2002 mcs@astro.caltech.edu
+           getline.c
+             I fixed a long time bug in the terminal resizing code.
+             When the cursor wasn't on the last terminal line of the
+             input line, the resizing code would redisplay the
+             the line one or more lines above where it should be
+             restored. This was due to an error in the calculation of
+             the number of lines above the cursor position.
+
+04/11/2002 mcs@astro.caltech.edu
+           demo.c demo2.c demo3.c
+             I used the new gl_display_text() function to display
+             introductory text at the startup of each of the demo
+             programs. The text is enclosed within a box of asterixes,
+             drawn dynamically to fit within the confines of the
+             available terminal width.
+
+04/11/2002 mcs@astro.caltech.edu
+           libtecla.h getline.c ioutil.c ioutil.h Makefile.rules
+           libtecla.map man3/gl_get_line.3 man3/gl_display_text.3
+             Needing a way to display introductory text intelligently
+             in the demo programs, I wrote and documented the
+             gl_display_text() function. This justifies arbitrary
+             length text within the bounds of the terminal width,
+             with or without optional indentation, prefixes and
+             suffixes.
+
+03/11/2002 mcs@astro.caltech.edu
+           demo3.c Makefile.rules
+             I wrote a new demonstration program. This program acts
+             exactly like the main demonstration program, except that
+             it uses an external event loop instead of using the
+             gl_get_line() internal event loop. This is thus an example
+             of the new non-blocking server I/O facility.
+
+02/11/2002 mcs@astro.caltech.edu
+           getline.c keytab.c keytab.h libtecla.h man3/gl_get_line.3
+           man3/gl_completion_action.3
+             I added the ability to register additional word
+             completion actions via the new function
+             gl_completion_action().  All action functions now take a
+             new (void *data) argument, which is stored with the
+             function in the symbol table of actions. The new
+             gl_completion_action() function uses this feature to
+             record dynamically allocated objects containing the
+             specified completion function and callback data along
+             with either the gl_complete_word() action function, or
+             the gl_list_completions() action function.  These two
+             actions continue to use the builtin completion functions
+             when their data pointer is NULL.
+
+20/10/2002 mcs@astro.caltech.edu
+           The following are changes merged from the non-blocking
+           gl_get_line() development branch.
+
+           getline.c
+             I wrote a gl_start_newline() function, to replace all of
+             the explicit calls to output \r\n to stdout.
+
+             Informational messages are now written to the terminal
+             using a new variadic function called gl_print_info().
+             This starts a newline, writes string arguments until a
+             special argument, GL_END_INFO, is seen, then starts
+             another newline.
+
+             Changed _output_ to _print_ in the following function
+             names gl_output_control_sequence(), gl_output_char(),
+             gl_output_string() and gl_output_raw_string().
+
+             gl_print_raw_string() now has a length argument, so that
+             strings that aren't terminated with '\0' can be printed.
+
+             The display of the initial contents of a new line to be
+             edited has been moved into a new function called
+             gl_present_line().
+
+             The gl_get_input_line() function now takes the prompt
+             string as an argument so that gl_replace_prompt() can be
+             called from within this function instead of from
+             gl_get_line().
+
+             Keyboard input is now buffered in a persistent buffer in
+             the parent GetLine object. gl_read_character() checks
+             this for unprocessed characters in preference to calling
+             gl_read_terminal() to append characters to it.  A new
+             function, gl_discard_chars(), removes processed
+             characters from this buffer. This change is in
+             preparation for a non-blocking version of gl_get_line(),
+             where partially input key-sequences must be stored
+             between calls to gl_get_line().
+
+           getline.c getline.h history.c history.h cplmatch.c \
+           cplmatch.h expand.c expand.h
+             All terminal output from gl_get_line() is now routed
+             through a GL_WRITE_FN() callback function called
+             gl_write_fn. Internal functions in cplmatch.c,
+             expand.c and history.c have been created which take
+             such callbacks to write output. These are used both
+             by functions in getline.c, to display file completions,
+             expansions, history etc, and as the internals of existing
+             public functions in these files that print to stdio
+             streams. In the latter case an internal stdio
+             GL_WRITE_FN() callback is substituted, so that the
+             functions behave as before.
+
+           getline.c chrqueue.c chrqueue.h
+             The gl_write_fn() callback used by gl_get_line() now
+             writes to a queue, implemented in chrqueue.c. This queue
+             is implemented as a list of blocks of buffer segments,
+             the number of which shrink and grow as
+             needed. The contents of the queue are flushed to the
+             terminal via another GL_WRITE_FN() callback passed to the
+             queue object. Currently gl_get_line() passes an internal
+             function assigned to gl-&gt;flush_fn, called
+             gl_flush_terminal(), which writes the contents of the
+             queue to the terminal, and knows how to handle both
+             blocking and non-blocking I/O. The output queue is
+             designed to be flushed to the terminal incrementally, and
+             thereby also facilitates non-blocking I/O.
+
+           getline.c getline.h
+             gl_get_line() now reads all input via the GL_READ_FN()
+             callback, assigned to gl-&gt;read_fn. Currently this is
+             set to an internal function called gl_read_terminal(),
+             which knows how to handle both blocking and
+             non-blocking I/O.
+
+           getline.c libtecla.h
+             The new gl_set_nonblocking() function can be used to
+             enable or disable non-blocking I/O. The default is still
+             blocking I/O. In non-blocking mode, the terminal is told
+             not to wait when either reading or writing would block.
+             gl_get_line() then returns, with a return value of NULL,
+             but with the terminal left in raw mode, so that the
+             caller's event loop can detect key presses. The caller
+             should call gl_return_status() to check whether the NULL
+             return value was due to an error, lack of input, or
+             inability to write to the terminal without waiting. If
+             either reading or writing was said to have blocked, the
+             user then should check for I/O readiness in the specified
+             direction before calling gl_get_line() again to
+             incrementally build up the input line.
+
+05/08/2002 mcs@astro.caltech.edu
+           man3/gl_get_line.3 man3/gl_inactivity_timeout.3
+             I documented the new gl_inactivity_timeout() function.
+
+08/07/2002 mcs@astro.caltech.edu
+           libtecla.h getline.c libtecla.map
+             I added a new gl_inactivity_timeout() function. On
+             systems that have the select system call, this provides
+             the option of registering a function that is then called
+             whenever no I/O activity has been seen for more than a
+             specified period of time. Like the gl_watch_fd()
+             facility, timeout callbacks return a code which tells
+             gl_get_line() how to proceed after the timeout has been
+             handled.
+             
+04/07/2002 mcs@astro.caltech.edu  (based on a bug report from Michael MacFaden)
+           getline.c
+             The internal event handler wasn't responding to write
+             events on client file descriptors, due to a typo which
+             resulted in read events being checked for twice, and
+             writes not checked for at all.
+           pathutil.c
+             The amount of space to allocate for pathnames is supposed
+             to come from PATH_MAX in limits.h, but I had neglected to
+             include limits.h. This went unnoticed because on most
+             systems the equivalent number is deduced by calling
+             pathconf(). Apparently under NetBSD this function doesn't
+             work correctly over NFS mounts.
+
+30/05/2002 Version 1.4.1 released.
 
 25/05/2002 mcs@astro.caltech.edu  (based on suggestions by Paul Smith)
            pathutil.c
@@ -22,6 +1273,21 @@ The most recent modifications are listed first.
              termios.h without a sub-directory prefix, as I was
              already doing futher up in the file, so I have just
              removed the errant include line.
+
+07/05/2002 mcs@astro.caltech.edu  (async development branch only)
+           getline.c
+             gl_read_character() now caches and reads unprocessed
+             characters from a key-press lookahead buffer. Whenever
+             gl_intepret_char() receives a new character which makes
+             an initially promising key-sequence no longer match the
+             prefix of any binding, it now simply discards the first
+             character from the key-press buffer and resets the buffer
+             pointer so that the next call to gl_read_character()
+             returns the character that followed it, from the buffer.
+           getline.c
+             The part of gl_get_input_line() which preloads, displays
+             and prepares to edit a new input line, has now been moved
+             into a function called gl_present_line().
 
 12/02/2002 mcs@astro.caltech.edu
            getline.c configure.in configure
@@ -170,7 +1436,7 @@ The most recent modifications are listed first.
            getline.c man3/gl_get_line.3
              gl_get_line() by default now prints any 8-bit printable
              characters that don't match keybindings. Previously
-             characters > 127 were only printed if preceded by the
+             characters &gt; 127 were only printed if preceded by the
              literal-next action.  Alternatively, by placing the
              command literal_if_printable in the tecla configuration
              file, all printable characters are treated as literal
@@ -198,7 +1464,7 @@ The most recent modifications are listed first.
              all be displayable. Now isprint() is consulted, and if it
              says that a character isn't printable, the character code
              is displayed in octal like \307. In non-C locales, some
-             characters with values > 127 are displayable, and
+             characters with values &gt; 127 are displayable, and
              isprint() tells gl_get_line() which are and which aren't.
 
 27/11/2001 mcs@astro.caltech.edu
@@ -207,7 +1473,7 @@ The most recent modifications are listed first.
              are now cast to (int)(unsigned char). Previously they
              were cast to (int), which doesn't correctly conform to
              the requirements of the C standard, and could cause
-             problems for characters with values > 127 on systems
+             problems for characters with values &gt; 127 on systems
              with signed char's.
 
 26/11/2001 mcs@astro.caltech.edu
@@ -603,7 +1869,7 @@ The most recent modifications are listed first.
 17/05/2001 mcs@astro.catlech.edu
 
            getline.c
-             Under Linux, calling fflush(gl->output_fd) hangs if
+             Under Linux, calling fflush(gl-&gt;output_fd) hangs if
              terminal output has been suspended with ^S. With the
              tecla library taking responsability for reading the stop
              and start characters this was a problem, because once
@@ -629,8 +1895,8 @@ The most recent modifications are listed first.
 12/05/2001 Tim Eliseo    (logged here by mcs)
 
            getline.c
-             Don't reset gl->number until after calling an action
-             function. By looking at whether gl->number is <0 or
+             Don't reset gl-&gt;number until after calling an action
+             function. By looking at whether gl-&gt;number is &lt;0 or
              not, action functions can then tell whether the count
              that they were passed was explicitly specified by the
              user, as opposed to being defaulted to 1.
@@ -651,12 +1917,12 @@ The most recent modifications are listed first.
            getline.c
              The test in gl_add_char_to_line() for detecting
              when overwriting a character with a wider character,
-             had a < where it needed a >. Overwriting with a wider
+             had a &lt; where it needed a &gt;. Overwriting with a wider
              character thus overwrote trailing characters. Tim also
              removed a redundant copy of the character into the
              line buffer.
            getline.c
-             gl_cursor_left() and gl->cursor_right() were executing
+             gl_cursor_left() and gl-&gt;cursor_right() were executing
              a lot of redundant code, when the existing call to the
              recently added gl_place_cursor() function, does all that
              is necessary.
@@ -749,7 +2015,7 @@ The most recent modifications are listed first.
 
            getline.c
              In gl_get_input_line(), don't redundantly copy the
-             start_line if start_line == gl->line.
+             start_line if start_line == gl-&gt;line.
 
 30/04/2001 Version 1.3.0 released.
 
@@ -819,7 +2085,7 @@ The most recent modifications are listed first.
              ef_expand_file().
 
              I also fixed the example in the man page, which cited
-             exp->file instead of exp->files, and changed the
+             exp-&gt;file instead of exp-&gt;files, and changed the
              dangerous name 'exp' with 'expn'.
            keytab.c:
              Key-binding tables start with 100 elements, and are
@@ -1071,7 +2337,7 @@ The most recent modifications are listed first.
              doing it again is fast.
            man3/pca_lookup_file.3
              I added a man page documenting the new PathCache module.
-           man3/<many-new-files>.3
+           man3/&lt;many-new-files&gt;.3
              I have added man pages for all of the functions in each
              of the modules. These 1-line pages use the .so directive
              to redirect nroff to the man page of the parent module.
@@ -1237,7 +2503,7 @@ The most recent modifications are listed first.
              details.
 
            getline.c man/gl_get_line.3
-             Markus noted that my choice of M-< for the default
+             Markus noted that my choice of M-&lt; for the default
              binding of read-from-file, could be confusing, since
              readline binds this to beginning-of-history. I have
              thus rebound it to ^X^F (ie. like find-file in emacs).
@@ -1245,7 +2511,7 @@ The most recent modifications are listed first.
            getline.c history.c history.h man/gl_get_line.3
              I have now implemented equivalents of the readline
              beginning-of-history and end-of-history actions.
-             These are bound to M-< and M-> respectively.
+             These are bound to M-&lt; and M-&gt; respectively.
 
            history.c history.h
              I Moved the definition of the GlHistory type, and
@@ -1257,7 +2523,7 @@ The most recent modifications are listed first.
 
            getline.c man/gl_get_line.3
              I added a "read-from-file" action function and bound it
-             by default to M-<. This causes gl_get_line() to
+             by default to M-&lt;. This causes gl_get_line() to
              temporarily return input from the file who's name
              precedes the cursor.
              
@@ -1492,4 +2758,4 @@ The most recent modifications are listed first.
              In the description of the ~/.teclarc configuration file,
              I had omitted the 'bind' command word in the example
              entry. I have now remedied this.
-</PRE></BODY>
+</pre></body></html>

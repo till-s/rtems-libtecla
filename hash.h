@@ -2,7 +2,7 @@
 #define hash_h
 
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -124,7 +124,7 @@ typedef enum {
   /* Create a new hash-table */
 
 HashTable *_new_HashTable(HashMemory *mem, int size, HashCase hcase,
-			 void *app_data, HASH_DEL_FN(*del_fn));
+			  void *app_data, HASH_DEL_FN(*del_fn));
 
   /* Delete a reference to a hash-table */
 

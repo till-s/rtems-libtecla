@@ -2,7 +2,7 @@
 #define history_h
 
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -32,7 +32,7 @@
  * of the copyright holder.
  */
 
-#include <stdio.h>  /* FILE * */
+#include <stdio.h>    /* FILE * */
 
 /*-----------------------------------------------------------------------
  * This module is used to record and traverse historical lines of user input.
@@ -106,8 +106,8 @@ int _glh_get_group(GlHistory *glh);
  * Display the contents of the history list to the specified stdio
  * output group.
  */
-int _glh_show_history(GlHistory *glh, FILE *fp, const char *fmt,
-		      int all_groups, int max_lines);
+int _glh_show_history(GlHistory *glh, GlWriteFn *write_fn, void *data,
+		      const char *fmt, int all_groups, int max_lines);
 
 /*
  * Change the size of the history buffer.
@@ -155,5 +155,15 @@ void _glh_range_of_history(GlHistory *glh, unsigned long *oldest,
  * buffer that is currently in use.
  */
 void _glh_size_of_history(GlHistory *glh, size_t *buff_size, size_t *buff_used);
+
+/*
+ * Get information about the last error in this module.
+ */
+const char *_glh_last_error(GlHistory *glh);
+
+/*
+ * Return non-zero if a history search session is currently in progress.
+ */
+int _glh_search_active(GlHistory *glh);
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -35,14 +35,18 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 /*
  * Local includes.
  */
 #include "libtecla.h"
+#include "ioutil.h"
 #include "stringrp.h"
 #include "pathutil.h"
 #include "cplfile.h"
+#include "cplmatch.h"
+#include "errmsg.h"
 
 /*
  * Specify the number of strings to allocate when the string free-list
@@ -52,23 +56,23 @@
 #define STR_BLK_FACT 100
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so don't decrease it below 80.
+ * Set the default number of spaces place between columns when listing
+ * a set of completions.
  */
-#define ERRLEN 200
+#define CPL_COL_SEP 2
 
 /*
  * Completion matches are recorded in containers of the following
  * type.
  */
 struct WordCompletion {
+  ErrMsg *err;            /* The error reporting buffer */
   StringGroup *sg;        /* Memory for a group of strings */
   int matches_dim;        /* The allocated size of result.matches[] */
-  char errmsg[ERRLEN+1];  /* The error-reporting buffer */
   CplMatches result;      /* Completions to be returned to the caller */
+#ifndef WITHOUT_FILE_SYSTEM
   CompleteFile *cf;       /* The resources used for filename completion */
+#endif
 };
 
 static void cpl_sort_matches(WordCompletion *cpl);
@@ -85,6 +89,7 @@ static int cpl_cmp_suffixes(const void *v1, const void *v2);
  */
 #define CFC_ID_CODE 4568
 
+#ifndef WITHOUT_FILE_SYSTEM
 /*
  * A pointer to a structure of the following type can be passed to
  * the builtin file-completion callback function to modify its behavior.
@@ -113,6 +118,39 @@ struct CplFileConf {
 
 static void cpl_init_FileConf(CplFileConf *cfc);
 
+/*
+ * When file-system access is being excluded, define a dummy structure
+ * to satisfy the typedef in libtecla.h.
+ */
+#else
+struct CplFileConf {int dummy;};
+#endif
+
+/*
+ * Encapsulate the formatting information needed to layout a
+ * multi-column listing of completions.
+ */
+typedef struct {
+  int term_width;     /* The width of the terminal (characters) */
+  int column_width;   /* The number of characters within in each column. */
+  int ncol;           /* The number of columns needed */
+  int nline;          /* The number of lines needed */
+} CplListFormat;
+
+/*
+ * Given the current terminal width, and a list of completions, determine
+ * how to best use the terminal width to display a multi-column listing
+ * of completions.
+ */
+static void cpl_plan_listing(CplMatches *result, int term_width,
+			     CplListFormat *fmt);
+
+/*
+ * Display a given line of a multi-column list of completions.
+ */
+static int cpl_format_line(CplMatches *result, CplListFormat *fmt, int lnum,
+			   GlWriteFn *write_fn, void *data);
+
 /*.......................................................................
  * Create a new string-completion object.
  *
@@ -127,7 +165,7 @@ WordCompletion *new_WordCompletion(void)
  */
   cpl = (WordCompletion *) malloc(sizeof(WordCompletion));
   if(!cpl) {
-    fprintf(stderr, "new_WordCompletion: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -135,18 +173,31 @@ WordCompletion *new_WordCompletion(void)
  * container at least up to the point at which it can safely be passed
  * to del_WordCompletion().
  */
+  cpl->err = NULL;
   cpl->sg = NULL;
   cpl->matches_dim = 0;
   cpl->result.suffix = NULL;
   cpl->result.cont_suffix = NULL;
   cpl->result.matches = NULL;
   cpl->result.nmatch = 0;
+#ifndef WITHOUT_FILE_SYSTEM
   cpl->cf = NULL;
+#endif
+/*
+ * Allocate a place to record error messages.
+ */
+  cpl->err = _new_ErrMsg();
+  if(!cpl->err)
+    return del_WordCompletion(cpl);
 /*
  * Allocate an object that allows a group of strings to be allocated
  * efficiently by placing many of them in contiguous string segments.
  */
+#ifdef WITHOUT_FILE_SYSTEM
+  cpl->sg = _new_StringGroup(MAX_PATHLEN_FALLBACK);
+#else
   cpl->sg = _new_StringGroup(_pu_pathname_dim());
+#endif
   if(!cpl->sg)
     return del_WordCompletion(cpl);
 /*
@@ -157,16 +208,17 @@ WordCompletion *new_WordCompletion(void)
   cpl->result.matches = (CplMatch *) malloc(sizeof(cpl->result.matches[0]) *
 					    cpl->matches_dim);
   if(!cpl->result.matches) {
-    fprintf(stderr,
-     "new_WordCompletion: Insufficient memory to allocate array of matches.\n");
+    errno = ENOMEM;
     return del_WordCompletion(cpl);
   };
 /*
  * Allocate a filename-completion resource object.
  */
+#ifndef WITHOUT_FILE_SYSTEM
   cpl->cf = _new_CompleteFile();
   if(!cpl->cf)
     return del_WordCompletion(cpl);
+#endif
   return cpl;
 }
 
@@ -181,11 +233,14 @@ WordCompletion *new_WordCompletion(void)
 WordCompletion *del_WordCompletion(WordCompletion *cpl)
 {
   if(cpl) {
+    cpl->err = _del_ErrMsg(cpl->err);
     cpl->sg = _del_StringGroup(cpl->sg);
     if(cpl->result.matches) {
       free(cpl->result.matches);
       cpl->result.matches = NULL;
+#ifndef WITHOUT_FILE_SYSTEM
       cpl->cf = _del_CompleteFile(cpl->cf);
+#endif
     };
     free(cpl);
   };
@@ -255,7 +310,9 @@ int cpl_add_completion(WordCompletion *cpl, const char *line,
     CplMatch *matches = (CplMatch *) realloc(cpl->result.matches,
 			    sizeof(cpl->result.matches[0]) * needed);
     if(!matches) {
-      strcpy(cpl->errmsg, "Insufficient memory to extend array of matches.");
+      _err_record_msg(cpl->err,
+		      "Insufficient memory to extend array of matches.",
+		      END_ERR_MSG);
       return 1;
     };
     cpl->result.matches = matches;
@@ -267,7 +324,8 @@ int cpl_add_completion(WordCompletion *cpl, const char *line,
  */
   string = _sg_alloc_string(cpl->sg, word_end-word_start + strlen(suffix));
   if(!string) {
-    strcpy(cpl->errmsg, "Insufficient memory to extend array of matches.");
+    _err_record_msg(cpl->err, "Insufficient memory to extend array of matches.",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -402,8 +460,9 @@ static int cpl_common_suffix(WordCompletion *cpl)
  */
   result->suffix = _sg_alloc_string(cpl->sg, length);
   if(!result->suffix) {
-    strcpy(cpl->errmsg,
-	   "Insufficient memory to record common completion suffix.");
+    _err_record_msg(cpl->err,
+		    "Insufficient memory to record common completion suffix.",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -435,7 +494,7 @@ static void cpl_clear_completions(WordCompletion *cpl)
 /*
  * Also clear the error message.
  */
-  cpl->errmsg[0] = '\0';
+  _err_clear_msg(cpl->err);
   return;
 }
 
@@ -464,8 +523,8 @@ static void cpl_clear_completions(WordCompletion *cpl)
  *                           cpl_last_error(cpl).
  */
 CplMatches *cpl_complete_word(WordCompletion *cpl, const char *line,
-				int word_end, void *data, 
-				CplMatchFn *match_fn)
+			      int word_end, void *data, 
+			      CplMatchFn *match_fn)
 {
   int line_len;   /* The total length of the input line */
 /*
@@ -476,8 +535,10 @@ CplMatches *cpl_complete_word(WordCompletion *cpl, const char *line,
  * Check the arguments.
  */
   if(!cpl || !line || !match_fn || word_end < 0 || word_end > line_len) {
-    if(cpl)
-      strcpy(cpl->errmsg, "cpl_complete_word: Invalid arguments.");
+    if(cpl) {
+      _err_record_msg(cpl->err, "cpl_complete_word: Invalid arguments.",
+		      END_ERR_MSG);
+    };
     return NULL;
   };
 /*
@@ -489,8 +550,8 @@ CplMatches *cpl_complete_word(WordCompletion *cpl, const char *line,
  * cpl->result.matches.
  */
   if(match_fn(cpl, data, line, word_end)) {
-    if(cpl->errmsg[0] == '\0')
-      strcpy(cpl->errmsg, "Error completing word.");
+    if(_err_get_msg(cpl->err)[0] == '\0')
+      _err_record_msg(cpl->err, "Error completing word.", END_ERR_MSG);
     return NULL;
   };
 /*
@@ -519,6 +580,29 @@ CplMatches *cpl_complete_word(WordCompletion *cpl, const char *line,
 }
 
 /*.......................................................................
+ * Recall the return value of the last call to cpl_complete_word().
+ *
+ * Input:
+ *  cpl    WordCompletion *  The completion resource object.
+ * Output:
+ *  return     CplMatches *  The container of the array of possible
+ *                           completions, as returned by the last call to
+ *                           cpl_complete_word(). The returned pointer refers
+ *                           to a container owned by the parent WordCompletion
+ *                           object, and its contents thus potentially
+ *                           change on every call to cpl_complete_word().
+ *                           On error, either in the execution of this
+ *                           function, or in the last call to
+ *                           cpl_complete_word(), NULL is returned, and a
+ *                           description of the error can be acquired by
+ *                           calling cpl_last_error(cpl).
+ */
+CplMatches *cpl_recall_matches(WordCompletion *cpl)
+{
+  return (!cpl || *_err_get_msg(cpl->err)!='\0') ? NULL : &cpl->result;
+}
+
+/*.......................................................................
  * Print out an array of matching completions.
  *
  * Input:
@@ -532,73 +616,47 @@ CplMatches *cpl_complete_word(WordCompletion *cpl, const char *line,
  */
 int cpl_list_completions(CplMatches *result, FILE *fp, int term_width)
 {
-  int maxlen;    /* The length of the longest matching string */
-  int width;     /* The width of a column */
-  int ncol;      /* The number of columns to list */
-  int nrow;      /* The number of rows needed to list all of the matches */
-  int row,col;   /* The row and column being written to */
-  int i;
-/*
- * Check the arguments.
+  return _cpl_output_completions(result, _io_write_stdio, fp, term_width);
+}
+
+/*.......................................................................
+ * Print an array of matching completions via a callback function.
+ *
+ * Input:
+ *  result   CplMatches *  The container of the sorted array of
+ *                         completions.
+ *  write_fn  GlWriteFn *  The function to call to write the completions,
+ *                         or 0 to discard the output.
+ *  data           void *  Anonymous data to pass to write_fn().
+ *  term_width      int    The width of the terminal.
+ * Output:
+ *  return          int     0 - OK.
+ *                          1 - Error.
  */
-  if(!result || !fp) {
-    fprintf(stderr, "cpl_list_completions: NULL argument(s).\n");
-    return 1;
-  };
+int _cpl_output_completions(CplMatches *result, GlWriteFn *write_fn, void *data,
+			    int term_width)
+{
+  CplListFormat fmt; /* List formatting information */
+  int lnum;          /* The sequential number of the line to print next */
 /*
  * Not enough space to list anything?
  */
   if(term_width < 1)
     return 0;
 /*
- * Work out the maximum length of the matching strings.
+ * Do we have a callback to write via, and any completions to be listed?
  */
-  maxlen = 0;
-  for(i=0; i<result->nmatch; i++) {
-    CplMatch *match = result->matches + i;
-    int len = strlen(match->completion) +
-              strlen(match->type_suffix);
-    if(len > maxlen)
-      maxlen = len;
-  };
+  if(write_fn && result && result->nmatch>0) {
 /*
- * Nothing to list?
+ * Work out how to arrange the listing into fixed sized columns.
  */
-  if(maxlen == 0)
-    return 0;
+    cpl_plan_listing(result, term_width, &fmt);
 /*
- * Split the available terminal width into columns of maxlen + 2 characters.
+ * Print the listing via the specified callback.
  */
-  width = maxlen + 2;
-  ncol = term_width / width;
-/*
- * If the column width is greater than the terminal width, the matches will
- * just have to overlap onto the next line.
- */
-  if(ncol < 1)
-    ncol = 1;
-/*
- * How many rows will be needed?
- */
-  nrow = (result->nmatch + ncol - 1) / ncol;
-/*
- * Print the matches out in ncol columns, sorted in row order within each
- * column.
- */
-  for(row=0; row < nrow; row++) {
-    for(col=0; col < ncol; col++) {
-      int m = col*nrow + row;
-      if(m < result->nmatch) {
-	CplMatch *match = result->matches + m;
-	if(fprintf(fp, "%s%-*s%s", match->completion,
-		   (int) (ncol > 1 ? maxlen - strlen(match->completion):0),
-		   match->type_suffix, col<ncol-1 ? "  " : "\r\n") < 0)
-	  return 1;
-      } else {
-	if(fprintf(fp, "\r\n") < 0)
-	  return 1;
-	break;
-      };
+    for(lnum=0; lnum < fmt.nline; lnum++) {
+      if(cpl_format_line(result, &fmt, lnum, write_fn, data))
+	return 1;
     };
   };
   return 0;
@@ -614,7 +672,7 @@ int cpl_list_completions(CplMatches *result, FILE *fp, int term_width)
  */
 const char *cpl_last_error(WordCompletion *cpl)
 {
-  return cpl ? cpl->errmsg : "NULL WordCompletion argument";
+  return cpl ? _err_get_msg(cpl->err) : "NULL WordCompletion argument";
 }
 
 /*.......................................................................
@@ -629,10 +687,8 @@ const char *cpl_last_error(WordCompletion *cpl)
  */
 void cpl_record_error(WordCompletion *cpl, const char *errmsg)
 {
-  if(cpl && errmsg) {
-    strncpy(cpl->errmsg, errmsg, ERRLEN);
-    cpl->errmsg[ERRLEN] = '\0';
-  };
+  if(cpl && errmsg)
+    _err_record_msg(cpl->err, errmsg, END_ERR_MSG);
 }
 
 /*.......................................................................
@@ -657,6 +713,9 @@ void cpl_record_error(WordCompletion *cpl, const char *errmsg)
  */
 CPL_MATCH_FN(cpl_file_completions)
 {
+#ifdef WITHOUT_FILE_SYSTEM
+  return 0;
+#else
   const char *start_path;  /* The pointer to the start of the pathname */
                            /*  in line[]. */
   CplFileConf *conf;       /* The new-style configuration object. */
@@ -671,7 +730,8 @@ CPL_MATCH_FN(cpl_file_completions)
   if(!cpl)
     return 1;
   if(!line || word_end < 0) {
-    strcpy(cpl->errmsg, "cpl_file_completions: Invalid arguments.");
+    _err_record_msg(cpl->err, "cpl_file_completions: Invalid arguments.",
+		    END_ERR_MSG);
     return 1;
   };
 /*
@@ -706,7 +766,8 @@ CPL_MATCH_FN(cpl_file_completions)
   if(conf->file_start < 0) {
     start_path = _pu_start_of_path(line, word_end);
     if(!start_path) {
-      strcpy(cpl->errmsg, "Unable to find the start of the filename.");
+      _err_record_msg(cpl->err, "Unable to find the start of the filename.",
+		      END_ERR_MSG);
       return 1;
     };
   } else {
@@ -721,6 +782,7 @@ CPL_MATCH_FN(cpl_file_completions)
     return 1;
   };
   return 0;
+#endif
 }
 
 /*.......................................................................
@@ -741,6 +803,7 @@ void cpl_init_FileArgs(CplFileArgs *cfa)
   };
 }
 
+#ifndef WITHOUT_FILE_SYSTEM
 /*.......................................................................
  * Initialize a CplFileConf structure with default configuration
  * parameters.
@@ -759,6 +822,7 @@ static void cpl_init_FileConf(CplFileConf *cfc)
     cfc->chk_data = NULL;
   };
 }
+#endif
 
 /*.......................................................................
  * Create a new CplFileConf object and initialize it with defaults.
@@ -768,6 +832,10 @@ static void cpl_init_FileConf(CplFileConf *cfc)
  */
 CplFileConf *new_CplFileConf(void)
 {
+#ifdef WITHOUT_FILE_SYSTEM
+  errno = EINVAL;
+  return NULL;
+#else
   CplFileConf *cfc;  /* The object to be returned */
 /*
  * Allocate the container.
@@ -782,6 +850,7 @@ CplFileConf *new_CplFileConf(void)
  */
   cpl_init_FileConf(cfc);
   return cfc;
+#endif
 }
 
 /*.......................................................................
@@ -794,12 +863,14 @@ CplFileConf *new_CplFileConf(void)
  */
 CplFileConf *del_CplFileConf(CplFileConf *cfc)
 {
+#ifndef WITHOUT_FILE_SYSTEM
   if(cfc) {
 /*
  * Delete the container.
  */
     free(cfc);
   };
+#endif
   return NULL;
 }
 
@@ -818,8 +889,10 @@ CplFileConf *del_CplFileConf(CplFileConf *cfc)
  */
 void cfc_literal_escapes(CplFileConf *cfc, int literal)
 {
+#ifndef WITHOUT_FILE_SYSTEM
   if(cfc)
     cfc->escaped = !literal;
+#endif
 }
 
 /*.......................................................................
@@ -837,8 +910,10 @@ void cfc_literal_escapes(CplFileConf *cfc, int literal)
  */
 void cfc_file_start(CplFileConf *cfc, int start_index)
 {
+#ifndef WITHOUT_FILE_SYSTEM
   if(cfc)
     cfc->file_start = start_index;
+#endif
 }
 
 /*.......................................................................
@@ -858,10 +933,12 @@ void cfc_file_start(CplFileConf *cfc, int start_index)
  */
 void cfc_set_check_fn(CplFileConf *cfc, CplCheckFn *chk_fn, void *chk_data)
 {
+#ifndef WITHOUT_FILE_SYSTEM
   if(cfc) {
     cfc->chk_fn = chk_fn;
     cfc->chk_data = chk_data;
   };
+#endif
 }
 
 /*.......................................................................
@@ -870,7 +947,11 @@ void cfc_set_check_fn(CplFileConf *cfc, CplCheckFn *chk_fn, void *chk_data)
  */
 CPL_CHECK_FN(cpl_check_exe)
 {
+#ifdef WITHOUT_FILE_SYSTEM
+  return 0;
+#else
   return _pu_path_is_exe(pathname);
+#endif
 }
 
 /*.......................................................................
@@ -924,4 +1005,166 @@ static void cpl_zap_duplicates(WordCompletion *cpl)
  */
   cpl->result.nmatch = dst;
   return;
+}
+
+/*.......................................................................
+ * Work out how to arrange a given array of completions into a listing
+ * of one or more fixed size columns.
+ *
+ * Input:
+ *  result   CplMatches *   The set of completions to be listed.
+ *  term_width      int     The width of the terminal. A lower limit of
+ *                          zero is quietly enforced.
+ * Input/Output:
+ *  fmt   CplListFormat *   The formatting information will be assigned
+ *                          to the members of *fmt.
+ */
+static void cpl_plan_listing(CplMatches *result, int term_width,
+			     CplListFormat *fmt)
+{
+  int maxlen;    /* The length of the longest matching string */
+  int i;
+/*
+ * Ensure that term_width >= 0.
+ */
+  if(term_width < 0)
+    term_width = 0;
+/*
+ * Start by assuming the worst case, that either nothing will fit
+ * on the screen, or that there are no matches to be listed.
+ */
+  fmt->term_width = term_width;
+  fmt->column_width = 0;
+  fmt->nline = fmt->ncol = 0;
+/*
+ * Work out the maximum length of the matching strings.
+ */
+  maxlen = 0;
+  for(i=0; i<result->nmatch; i++) {
+    CplMatch *match = result->matches + i;
+    int len = strlen(match->completion) + strlen(match->type_suffix);
+    if(len > maxlen)
+      maxlen = len;
+  };
+/*
+ * Nothing to list?
+ */
+  if(maxlen == 0)
+    return;
+/*
+ * Split the available terminal width into columns of
+ * maxlen + CPL_COL_SEP characters.
+ */
+  fmt->column_width = maxlen;
+  fmt->ncol = fmt->term_width / (fmt->column_width + CPL_COL_SEP);
+/*
+ * If the column width is greater than the terminal width, zero columns
+ * will have been selected. Set a lower limit of one column. Leave it
+ * up to the caller how to deal with completions who's widths exceed
+ * the available terminal width.
+ */
+  if(fmt->ncol < 1)
+    fmt->ncol = 1;
+/*
+ * How many lines of output will be needed?
+ */
+  fmt->nline = (result->nmatch + fmt->ncol - 1) / fmt->ncol;
+  return;
+}
+
+/*.......................................................................
+ * Render one line of a multi-column listing of completions, using a
+ * callback function to pass the output to an arbitrary destination.
+ *
+ * Input:
+ *  result      CplMatches *  The container of the sorted array of
+ *                            completions.
+ *  fmt      CplListFormat *  Formatting information.
+ *  lnum               int    The index of the line to print, starting
+ *                            from 0, and incrementing until the return
+ *                            value indicates that there is nothing more
+ *                            to be printed.
+ *  write_fn     GlWriteFn *  The function to call to write the line, or
+ *                            0 to discard the output.
+ *  data              void *  Anonymous data to pass to write_fn().
+ * Output:
+ *  return             int    0 - Line printed ok.
+ *                            1 - Nothing to print.
+ */
+static int cpl_format_line(CplMatches *result, CplListFormat *fmt, int lnum,
+			   GlWriteFn *write_fn, void *data)
+{
+  int col;             /* The index of the list column being output */
+/*
+ * If the line index is out of bounds, there is nothing to be written.
+ */
+  if(lnum < 0 || lnum >= fmt->nline)
+    return 1;
+/*
+ * If no output function has been provided, return as though the
+ * line had been printed.
+ */
+  if(!write_fn)
+    return 0;
+/*
+ * Print the matches in 'ncol' columns, sorted in line order within each
+ * column.
+ */
+  for(col=0; col < fmt->ncol; col++) {
+    int m = col*fmt->nline + lnum;
+/*
+ * Is there another match to be written? Note that in general
+ * the last line of a listing will have fewer filled columns
+ * than the initial lines.
+ */
+    if(m < result->nmatch) {
+      CplMatch *match = result->matches + m;
+/*
+ * How long are the completion and type-suffix strings?
+ */
+      int clen = strlen(match->completion);
+      int tlen = strlen(match->type_suffix);
+/*
+ * Write the completion string.
+ */
+      if(write_fn(data, match->completion, clen) != clen)
+	return 1;
+/*
+ * Write the type suffix, if any.
+ */
+      if(tlen > 0 && write_fn(data, match->type_suffix, tlen) != tlen)
+	return 1;
+/*
+ * If another column follows the current one, pad to its start with spaces.
+ */
+      if(col+1 < fmt->ncol) {
+/*
+ * The following constant string of spaces is used to pad the output.
+ */
+	static const char spaces[] = "                    ";
+	static const int nspace = sizeof(spaces) - 1;
+/*
+ * Pad to the next column, using as few sub-strings of the spaces[]
+ * array as possible.
+ */
+	int npad = fmt->column_width + CPL_COL_SEP - clen - tlen;
+	while(npad>0) {
+	  int n = npad > nspace ? nspace : npad;
+	  if(write_fn(data, spaces + nspace - n, n) != n)
+	    return 1;
+	  npad -= n;
+	};
+      };
+    };
+  };
+/*
+ * Start a new line.
+ */
+  {
+    char s[] = "\r\n";
+    int n = strlen(s);
+    if(write_fn(data, s, n) != n)
+      return 1;
+  };
+  return 0;
 }

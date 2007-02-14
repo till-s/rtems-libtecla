@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -31,6 +31,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "strngmem.h"
 #include "freelist.h"
@@ -44,8 +45,6 @@ struct StringMem {
  * Create a string free-list container and the first block of its free-list.
  *
  * Input:
- *  caller     const char *  The name of the calling function, or NULL
- *                           to not report errors to stderr.
  *  blocking_factor   int    The blocking_factor argument specifies how
  *                           many strings of length SM_STRLEN
  *                           bytes (see stringmem.h) are allocated in each
@@ -57,17 +56,14 @@ struct StringMem {
  *  return      StringMem *  The new free-list container, or NULL on
  *                           error.
  */
-StringMem *_new_StringMem(const char *caller, unsigned blocking_factor)
+StringMem *_new_StringMem(unsigned blocking_factor)
 {
   StringMem *sm;    /* The container to be returned. */
 /*
  * Check arguments.
  */
   if(blocking_factor < 1) {
-    if(caller) {
-      fprintf(stderr, "_new_StringMem (%s): Bad blocking factor (%d).\n",
-	      caller, blocking_factor);
-    };
+    errno = EINVAL;
     return NULL;
   };
 /*
@@ -75,8 +71,7 @@ StringMem *_new_StringMem(const char *caller, unsigned blocking_factor)
  */
   sm = (StringMem *) malloc(sizeof(StringMem));
   if(!sm) {
-    if(caller)
-      fprintf(stderr, "_new_StringMem (%s): Insufficient memory.\n", caller);
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -89,9 +84,9 @@ StringMem *_new_StringMem(const char *caller, unsigned blocking_factor)
 /*
  * Allocate the free-list.
  */
-  sm->fl = _new_FreeList(caller, SM_STRLEN, blocking_factor);
+  sm->fl = _new_FreeList(SM_STRLEN, blocking_factor);
   if(!sm->fl)
-    return _del_StringMem(caller, sm, 1);
+    return _del_StringMem(sm, 1);
 /*
  * Return the free-list container.
  */
@@ -102,8 +97,6 @@ StringMem *_new_StringMem(const char *caller, unsigned blocking_factor)
  * Delete a string free-list.
  *
  * Input:
- *  caller  const char *  The name of the calling function, or NULL to
- *                        not report errors to stderr.
  *  sm       StringMem *  The string free-list to be deleted, or NULL.
  *  force          int    If force==0 then _del_StringMem() will complain
  *                         and refuse to delete the free-list if any
@@ -115,21 +108,20 @@ StringMem *_new_StringMem(const char *caller, unsigned blocking_factor)
  *  return   StringMem *  Always NULL (even if the list couldn't be
  *                        deleted).
  */
-StringMem *_del_StringMem(const char *caller, StringMem *sm, int force)
+StringMem *_del_StringMem(StringMem *sm, int force)
 {
   if(sm) {
 /*
  * Check whether any strings have not been returned to the free-list.
  */
     if(!force && (sm->nmalloc > 0 || _busy_FreeListNodes(sm->fl) > 0)) {
-      if(caller)
-	fprintf(stderr, "_del_StringMem (%s): Free-list in use.\n", caller);
+      errno = EBUSY;
       return NULL;
     };
 /*
  * Delete the free-list.
  */
-    sm->fl = _del_FreeList(caller, sm->fl, force);
+    sm->fl = _del_FreeList(sm->fl, force);
 /*
  * Delete the container.
  */

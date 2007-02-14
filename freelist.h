@@ -2,7 +2,7 @@
 #define freelist_h
 
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -46,8 +46,7 @@ typedef struct FreeList FreeList;
  * the sizeof() operator to the object type that you intend to allocate from
  * the freelist.
  */
-FreeList *_new_FreeList(const char *caller, size_t node_size,
-			unsigned blocking_factor);
+FreeList *_new_FreeList(size_t node_size, unsigned blocking_factor);
 
 /*
  * If it is known that none of the nodes currently allocated from
@@ -62,12 +61,18 @@ void _rst_FreeList(FreeList *fl);
 /*
  * Delete a free-list.
  */
-FreeList *_del_FreeList(const char *caller, FreeList *fl, int force);
+FreeList *_del_FreeList(FreeList *fl, int force);
 
 /*
- * Determine the number of nodes that are currently allocated.
+ * Determine the number of nodes that are currently in use.
  */
 long _busy_FreeListNodes(FreeList *fl);
+
+/*
+ * Query the number of allocated nodes in the freelist which are
+ * currently unused.
+ */
+long _idle_FreeListNodes(FreeList *fl);
 
 /*
  * Allocate a new object from a free-list.
