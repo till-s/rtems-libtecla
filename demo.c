@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd
+ * Copyright (c) 2000, 2001 by the California Institute of Technology.
  * 
  * All rights reserved.
  * 
@@ -41,15 +41,11 @@
 
 #include "libtecla.h"
 
-/* The function which displays the introductory text of the demo */
+#ifdef __rtems__
+#define main tecla_main
+#endif
 
-static void show_demo_introduction(GetLine *gl);
-
-/*.......................................................................
- * This program demonstrates how to use gl_get_line() as a line editor to
- * to enable users to enter input. It takes no arguments.
- */
-int main(int argc, char *argv[])
+int tecla_main(int argc, char *argv[])
 {
   char *line;             /* A line of input */
   GetLine *gl;            /* The line editor */
@@ -70,18 +66,12 @@ int main(int argc, char *argv[])
  * Lookup and display the version number of the library.
  */
   libtecla_version(&major, &minor, &micro);
-  printf("\n Welcome to the main demo program of libtecla version %d.%d.%d\n",
+  printf("Welcome to the demo program of libtecla version %d.%d.%d\n",
 	 major, minor, micro);
-/*
- * Display an introductory banner.
- */
-  show_demo_introduction(gl);
 /*
  * Load history.
  */
-#ifndef WITHOUT_FILE_SYSTEM
   (void) gl_load_history(gl, "~/.demo_history", "#");
-#endif
 /*
  * Read lines of input from the user and print them to stdout.
  */
@@ -108,17 +98,12 @@ int main(int argc, char *argv[])
       GlTerminalSize size = gl_terminal_size(gl, 80, 24);
       printf("Terminal size = %d columns x %d lines.\n", size.ncolumn,
 	     size.nline);
-    } else if(strcmp(line, "clear\n")==0) {
-      if(gl_erase_terminal(gl))
-	return 1;
     };
   } while(1);
 /*
  * Save historical command lines.
  */
-#ifndef WITHOUT_FILE_SYSTEM
   (void) gl_save_history(gl, "~/.demo_history", "#", -1);
-#endif
 /*
  * Clean up.
  */
@@ -126,41 +111,3 @@ int main(int argc, char *argv[])
   return 0;
 }
 
-/*.......................................................................
- * Display introductory text to the user, formatted according to the
- * current terminal width and enclosed in a box of asterixes.
- *
- * Input:
- *  gl      GetLine *   The resource object of gl_get_line().
- */
-static void show_demo_introduction(GetLine *gl)
-{
-  int start;     /* The column in which gl_display_text() left the cursor */
-  int i;
-/*
- * Break the indtroductory text into an array of strings, so as to
- * avoid overflowing any compiler string limits.
- */
-  const char *doc[] = {
-    "This program is a simple shell with which you can experiment with the ",
-    "line editing and tab completion facilities provided by the gl_get_line() ",
-    "function. The file demo.c also serves as a fully commented example ",
-    "of how to use gl_get_line().\n"
-  };
-/*
- * Form the top line of the documentation box by filling the area of
- * the line between a " *" prefix and a "* " suffix with asterixes.
- */
-  printf("\n");
-  gl_display_text(gl, 0, " *", "* ", '*', 80, 0, "\n");
-/*
- * Justify the documentation text within margins of asterixes.
- */
-  for(start=0,i=0; i<sizeof(doc)/sizeof(doc[0]) && start >= 0; i++)
-    start = gl_display_text(gl, 0, " * ", " * ", ' ', 80, start,doc[i]);
-/*
- * Draw the bottom line of the documentation box.
- */
-  gl_display_text(gl, 0, " *", "* ", '*', 80, 0, "\n");
-  printf("\n");
-}

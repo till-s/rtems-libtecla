@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -29,6 +29,18 @@
  * of the copyright holder.
  */
 
+
+/* re-enable OPOST so others may print to the RTEMS console
+ * T. Straumann, 2003/3/18
+ *
+ */
+/* OPOST_HACK values:
+ *  1 enable OPOST while waiting for input chars 
+ *  2 globally (always) enable OPOST
+ *  undefined: do not use any hack
+ */
+#define CONFIG_OPOST_HACK  1
+
 /*
  * Standard headers.
  */
@@ -39,18 +51,38 @@
 #include <errno.h>
 #include <ctype.h>
 #include <setjmp.h>
-#include <stdarg.h>
 
 /*
  * UNIX headers.
  */
+#ifndef __rtems__
 #include <sys/ioctl.h>
-#ifdef HAVE_SELECT
-#ifdef HAVE_SYS_SELECT_H
-#include <sys/select.h>
 #endif
+#ifdef HAVE_SELECT
 #include <sys/time.h>
 #include <sys/types.h>
+#include  <sys/select.h>
+#endif
+
+#ifdef __rtems__
+#ifndef NSIG 
+#define NSIG 0
+#endif
+#define sigismember(a,b) my_sigismember(a,b)
+static int
+my_sigismember (const sigset_t * set, int signo)
+{
+		if (signo >= NSIG || signo <= 0)
+		{
+				errno = EINVAL;
+				return -1;
+		}
+
+		if (*set & (1 << (signo - 1)))
+				return 1;
+		else
+				return 0;
+}
 #endif
 
 /*
@@ -82,7 +114,14 @@
 #if defined(USE_TERMCAP) && defined(HAVE_TERMCAP_H)
 #include <termcap.h>
 #endif
-
+/*
+ * Unfortunately both terminfo and termcap require one to use the tputs()
+ * function to output terminal control characters, and this function
+ * doesn't allow one to specify a file stream. As a result, the following
+ * file-scope variable is used to pass the current output file stream.
+ * This is bad, but there doesn't seem to be any alternative.
+ */
+static FILE *tputs_fp = NULL;
 /*
  * Under Solaris default Curses the output function that tputs takes is
  * declared to have a char argument. On all other systems and on Solaris
@@ -95,42 +134,34 @@
  * other systems.
  */
 #if defined __sun && defined __SVR4 && !defined _XOPEN_CURSES
-typedef int TputsRetType;
-typedef char TputsArgType;              /* int tputs(char c, FILE *fp) */
-#define TPUTS_RETURNS_VALUE 1
+static int gl_tputs_putchar(char c) {return putc(c, tputs_fp);}
 #elif defined(__APPLE__) && defined(__MACH__)
-typedef void TputsRetType;
-typedef int TputsArgType;               /* void tputs(int c, FILE *fp) */
-#define TPUTS_RETURNS_VALUE 0
+static void gl_tputs_putchar(int c) {(void) putc(c, tputs_fp);}
 #else
-typedef int TputsRetType;
-typedef int TputsArgType;               /* int tputs(int c, FILE *fp) */
-#define TPUTS_RETURNS_VALUE 1
+static int gl_tputs_putchar(int c) {return putc(c, tputs_fp);}
 #endif
-
-/*
- * Use the above specifications to prototype our tputs callback function.
- */
-static TputsRetType gl_tputs_putchar(TputsArgType c);
-
-#endif  /* defined(USE_TERMINFO) || defined(USE_TERMCAP) */
-
-/*
- * If the library is being compiled without filesystem access facilities,
- * ensure that none of the action functions that normally do access the
- * filesystem are bound by default, and that it they do get bound, that
- * they don't do anything.
- */
-#if WITHOUT_FILE_SYSTEM
-#define HIDE_FILE_SYSTEM
 #endif
 
 /*
  * POSIX headers.
  */
 #include <unistd.h>
-#include <fcntl.h>
+#ifdef __rtems__
+#include <rtems-hackdefs.h>
+#else
 #include <termios.h>
+#endif
+
+/*
+ * Does the system provide the signal and ioctl query facility used
+ * to inform the process of terminal window size changes?
+ */
+#if (defined(SIGWINCH) || defined(__rtems__)) && defined(TIOCGWINSZ)
+#ifndef SIGWINCH
+#define SIGWINCH	28
+#endif
+#define USE_SIGWINCH 1
+#endif
 
 /*
  * Provide typedefs for standard POSIX structures.
@@ -139,48 +170,15 @@ typedef struct sigaction SigAction;
 typedef struct termios Termios;
 
 /*
- * Which flag is used to select non-blocking I/O with fcntl()?
- */
-#undef NON_BLOCKING_FLAG
-#if defined(O_NONBLOCK)
-#define NON_BLOCKING_FLAG (O_NONBLOCK)
-#elif defined(O_NDELAY)
-#define NON_BLOCKING_FLAG (O_NDELAY)
-#endif
-
-/*
- * What value should we give errno if I/O blocks when it shouldn't.
- */
-#undef BLOCKED_ERRNO
-#if defined(EAGAIN)
-#define BLOCKED_ERRNO (EAGAIN)
-#elif defined(EWOULDBLOCK)
-#define BLOCKED_ERRNO (EWOULDBLOCK)
-#elif defined(EIO)
-#define BLOCKED_ERRNO (EIO)
-#else
-#define BLOCKED_ERRNO 0
-#endif
-
-/*
  * Local headers.
  */
-#ifndef WITHOUT_FILE_SYSTEM
 #include "pathutil.h"
-#endif
 #include "libtecla.h"
 #include "keytab.h"
-#include "getline.h"
-#include "ioutil.h"
 #include "history.h"
 #include "freelist.h"
 #include "stringrp.h"
-#include "chrqueue.h"
-#include "cplmatch.h"
-#ifndef WITHOUT_FILE_SYSTEM
-#include "expand.h"
-#endif
-#include "errmsg.h"
+#include "getline.h"
 
 /*
  * Enumerate the available editing styles.
@@ -190,11 +188,6 @@ typedef enum {
   GL_VI_MODE,      /* Vi style editing */
   GL_NO_EDITOR     /* Fall back to the basic OS-provided editing */
 } GlEditor;
-
-/*
- * Set the largest key-sequence that can be handled.
- */
-#define GL_KEY_MAX 64
 
 /*
  * In vi mode, the following datatype is used to implement the
@@ -215,7 +208,7 @@ typedef struct {
  * needed by the vi-repeat-change command.
  */
 typedef struct {
-  KtAction action;           /* The last action function that made a */
+  KtKeyFn *fn;               /* The last action function that made a */
                              /*  change to the line. */
   int count;                 /* The repeat count that was passed to the */
                              /*  above command. */  
@@ -225,7 +218,7 @@ typedef struct {
   int command_curpos;        /* Whenever vi command mode is entered, the */
                              /*  the location of the cursor is recorded */
                              /*  here. */
-  char input_char;           /* Commands that call gl_read_terminal() */
+  char input_char;           /* Commands that call gl_read_character() */
                              /*  record the character here, so that it can */
                              /*  used on repeating the function. */
   int saved;                 /* True if a function has been saved since the */
@@ -281,12 +274,13 @@ struct GlFdNode {
  */
 #define GLFD_FREELIST_BLOCKING 10
 
+/*
+ * Listen for and handle file-descriptor events.
+ */
+static int gl_event_handler(GetLine *gl);
 
 static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
 			      GlFdEvent event);
-
-static int gl_call_timeout_handler(GetLine *gl);
-
 #endif
 
 /*
@@ -312,61 +306,18 @@ struct GlSignalNode {
 #define GLS_FREELIST_BLOCKING 30
 
 /*
- * Completion handlers and their callback data are recorded in
- * nodes of the following type.
- */
-typedef struct GlCplCallback GlCplCallback;
-struct GlCplCallback {
-  CplMatchFn *fn;            /* The completion callback function */
-  void *data;                /* Arbitrary callback data */
-};
-
-/*
- * The following function is used as the default completion handler when
- * the filesystem is to be hidden. It simply reports no completions.
- */
-#ifdef HIDE_FILE_SYSTEM
-static CPL_MATCH_FN(gl_no_completions);
-#endif
-
-/*
- * Specify how many GlCplCallback nodes are added to the GlCplCallback freelist
- * whenever it becomes exhausted.
- */
-#define GL_CPL_FREELIST_BLOCKING 10
-
-/*
- * External action functions and their callback data are recorded in
- * nodes of the following type.
- */
-typedef struct GlExternalAction GlExternalAction;
-struct GlExternalAction {
-  GlActionFn *fn;          /* The function which implements the action */
-  void *data;              /* Arbitrary callback data */
-};
-
-/*
- * Specify how many GlExternalAction nodes are added to the
- * GlExternalAction freelist whenever it becomes exhausted.
- */
-#define GL_EXT_ACT_FREELIST_BLOCKING 10
-
-/*
  * Define the contents of the GetLine object.
  * Note that the typedef for this object can be found in libtecla.h.
  */
 struct GetLine {
-  ErrMsg *err;               /* The error-reporting buffer */
   GlHistory *glh;            /* The line-history buffer */
   WordCompletion *cpl;       /* String completion resource object */
-  GlCplCallback cplfn;       /* The completion callback */
-#ifndef WITHOUT_FILE_SYSTEM
+  CplMatchFn(*cpl_fn);       /* The tab completion callback function */
+  void *cpl_data;            /* Callback data to pass to cpl_fn() */
   ExpandFile *ef;            /* ~user/, $envvar and wildcard expansion */
                              /*  resource object. */
-#endif
   StringGroup *capmem;       /* Memory for recording terminal capability */
                              /*  strings. */
-  GlCharQueue *cq;           /* The terminal output character queue */
   int input_fd;              /* The file descriptor to read on */
   int output_fd;             /* The file descriptor to write to */
   FILE *input_fp;            /* A stream wrapper around input_fd */
@@ -377,61 +328,33 @@ struct GetLine {
   char *term;                /* The terminal type specified on the last call */
                              /*  to gl_change_terminal(). */
   int is_term;               /* True if stdin is a terminal */
-  GlWriteFn *flush_fn;       /* The function to call to write to the terminal */
-  GlIOMode io_mode;          /* The I/O mode established by gl_io_mode() */
-  int raw_mode;              /* True while the terminal is in raw mode */
-  GlPendingIO pending_io;    /* The type of I/O that is currently pending */
-  GlReturnStatus rtn_status; /* The reason why gl_get_line() returned */
-  int rtn_errno;             /* THe value of errno associated with rtn_status */
   size_t linelen;            /* The max number of characters per line */
   char *line;                /* A line-input buffer of allocated size */
                              /*  linelen+2. The extra 2 characters are */
                              /*  reserved for "\n\0". */
   char *cutbuf;              /* A cut-buffer of the same size as line[] */
-  char *prompt;              /* The current prompt string */
+  const char *prompt;        /* The current prompt string */
   int prompt_len;            /* The length of the prompt string */
   int prompt_changed;        /* True after a callback changes the prompt */
   int prompt_style;          /* How the prompt string is displayed */
-  FreeList *cpl_mem;         /* Memory for GlCplCallback objects */
-  FreeList *ext_act_mem;     /* Memory for GlExternalAction objects */
   FreeList *sig_mem;         /* Memory for nodes of the signal list */
   GlSignalNode *sigs;        /* The head of the list of signals */
-  int signals_masked;        /* True between calls to gl_mask_signals() and */
-                             /*  gl_unmask_signals() */
-  int signals_overriden;     /* True between calls to gl_override_signals() */
-                             /*  and gl_restore_signals() */
-  sigset_t all_signal_set;   /* The set of all signals that we are trapping */
-  sigset_t old_signal_set;   /* The set of blocked signals on entry to */
-                             /*  gl_get_line(). */
-  sigset_t use_signal_set;   /* The subset of all_signal_set to unblock */
-                             /*  while waiting for key-strokes */
+  sigset_t old_signal_set;   /* The signal set on entry to gl_get_line() */
+  sigset_t new_signal_set;   /* The set of signals that we are trapping */
   Termios oldattr;           /* Saved terminal attributes. */
   KeyTab *bindings;          /* A table of key-bindings */
   int ntotal;                /* The number of characters in gl->line[] */
   int buff_curpos;           /* The cursor position within gl->line[] */
   int term_curpos;           /* The cursor position on the terminal */
-  int term_len;              /* The number of terminal characters used to */
-                             /*  display the current input line. */
   int buff_mark;             /* A marker location in the buffer */
   int insert_curpos;         /* The cursor position at start of insert */
   int insert;                /* True in insert mode */ 
   int number;                /* If >= 0, a numeric argument is being read */
   int endline;               /* True to tell gl_get_input_line() to return */
                              /*  the current contents of gl->line[] */
-  int displayed;             /* True if an input line is currently displayed */
-  int redisplay;             /* If true, the input line will be redrawn */
-                             /*  either after the current action function */
-                             /*  returns, or when gl_get_input_line() */
-                             /*  is next called. */
-  int postpone;              /* _gl_normal_io() sets this flag, to */
-                             /*  postpone any redisplays until */
-                             /*  is next called, to resume line editing. */
-  char keybuf[GL_KEY_MAX+1]; /* A buffer of currently unprocessed key presses */
-  int nbuf;                  /* The number of characters in keybuf[] */
-  int nread;                 /* The number of characters read from keybuf[] */
-  KtAction current_action;   /* The action function that is being invoked */
-  int current_count;         /* The repeat count passed to */
-                             /*  current_acction.fn() */
+  KtKeyFn *current_fn;       /* The action function that is currently being */
+                             /*  invoked. */
+  int current_count;         /* The repeat count passed to current_fn() */
   GlhLineID preload_id;      /* When not zero, this should be the ID of a */
                              /*  line in the history buffer for potential */
                              /*  recall. */
@@ -439,12 +362,10 @@ struct GetLine {
                              /*  gl_get_input_line() is next called. */
   long keyseq_count;         /* The number of key sequences entered by the */
                              /*  the user since new_GetLine() was called. */
-  long last_search;          /* The value of keyseq_count during the last */
+  long last_search;          /* The value of oper_count during the last */
                              /*  history search operation. */
   GlEditor editor;           /* The style of editing, (eg. vi or emacs) */
   int silence_bell;          /* True if gl_ring_bell() should do nothing. */
-  int automatic_history;     /* True to automatically archive entered lines */
-                             /*  in the history list. */
   ViMode vi;                 /* Parameters used when editing in vi mode */
   const char *left;          /* The string that moves the cursor 1 character */
                              /*  left. */
@@ -506,15 +427,6 @@ struct GetLine {
   fd_set wfds;               /* The set of fds to watch for writability */
   fd_set ufds;               /* The set of fds to watch for urgent data */
   int max_fd;                /* The maximum file-descriptor being watched */
-  struct {                   /* Inactivity timeout related data */
-    struct timeval dt;       /* The inactivity timeout when timer.fn() */
-                             /*  isn't 0 */
-    GlTimeoutFn *fn;         /* The application callback to call when */
-                             /*  the inactivity timer expires, or 0 if */
-                             /*  timeouts are not required. */
-    void *data;              /* Application provided data to be passed to */
-                             /*  timer.fn(). */
-  } timer;
 #endif
 };
 
@@ -545,23 +457,6 @@ struct GetLine {
 #define GL_DEF_NCOLUMN 80
 
 /*
- * Enumerate the attributes needed to classify different types of
- * signals. These attributes reflect the standard default
- * characteristics of these signals (according to Richard Steven's
- * Advanced Programming in the UNIX Environment). Note that these values
- * are all powers of 2, so that they can be combined in a bitwise union.
- */
-typedef enum {
-  GLSA_TERM=1,   /* A signal that terminates processes */
-  GLSA_SUSP=2,   /* A signal that suspends processes */
-  GLSA_CONT=4,   /* A signal that is sent when suspended processes resume */
-  GLSA_IGN=8,    /* A signal that is ignored */
-  GLSA_CORE=16,  /* A signal that generates a core dump */
-  GLSA_HARD=32,  /* A signal generated by a hardware exception */
-  GLSA_SIZE=64   /* A signal indicating terminal size changes */
-} GlSigAttr;
-
-/*
  * List the signals that we need to catch. In general these are
  * those that by default terminate or suspend the process, since
  * in such cases we need to restore terminal settings.
@@ -570,64 +465,60 @@ static const struct GlDefSignal {
   int signo;            /* The number of the signal */
   unsigned flags;       /* A bitwise union of GlSignalFlags enumerators */
   GlAfterSignal after;  /* What to do after the signal has been delivered */
-  int attr;             /* The default attributes of this signal, expressed */
-                        /* as a bitwise union of GlSigAttr enumerators */
   int errno_value;      /* What to set errno to */
 } gl_signal_list[] = {
-  {SIGABRT,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM|GLSA_CORE, EINTR},
-  {SIGALRM,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM,           0},
-  {SIGCONT,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_CONT|GLSA_IGN,  0},
+#ifndef __rtems__
+  {SIGABRT,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
+  {SIGINT,    GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
+  {SIGTERM,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
+  {SIGALRM,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
+#ifdef SIGCONT
+  {SIGCONT,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
+#endif
 #if defined(SIGHUP)
 #ifdef ENOTTY
-  {SIGHUP,    GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           ENOTTY},
+  {SIGHUP,    GLS_SUSPEND_INPUT, GLS_ABORT, ENOTTY},
 #else
-  {SIGHUP,    GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EINTR},
+  {SIGHUP,    GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
 #endif
 #endif
-  {SIGINT,    GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EINTR},
 #if defined(SIGPIPE)
 #ifdef EPIPE
-  {SIGPIPE,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EPIPE},
+  {SIGPIPE,   GLS_SUSPEND_INPUT, GLS_ABORT, EPIPE},
 #else
-  {SIGPIPE,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EINTR},
+  {SIGPIPE,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
 #endif
-#endif
-#ifdef SIGPOLL
-  {SIGPOLL,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EINTR},
 #endif
 #ifdef SIGPWR
-  {SIGPWR,    GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_IGN,            0},
+  {SIGPWR,    GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGQUIT
-  {SIGQUIT,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM|GLSA_CORE, EINTR},
+  {SIGQUIT,   GLS_SUSPEND_INPUT, GLS_ABORT, EINTR},
 #endif
-  {SIGTERM,   GLS_SUSPEND_INPUT,    GLS_ABORT, GLSA_TERM,           EINTR},
 #ifdef SIGTSTP
-  {SIGTSTP,   GLS_SUSPEND_INPUT, GLS_CONTINUE, GLSA_SUSP,           0},
+  {SIGTSTP,   GLS_SUSPEND_INPUT, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGTTIN
-  {SIGTTIN,   GLS_SUSPEND_INPUT, GLS_CONTINUE, GLSA_SUSP,           0},
+  {SIGTTIN,   GLS_SUSPEND_INPUT, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGTTOU
-  {SIGTTOU,   GLS_SUSPEND_INPUT, GLS_CONTINUE, GLSA_SUSP,           0},
+  {SIGTTOU,   GLS_SUSPEND_INPUT, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGUSR1
-  {SIGUSR1,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM,           0},
+  {SIGUSR1,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGUSR2
-  {SIGUSR2,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM,           0},
+  {SIGUSR2,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGVTALRM
-  {SIGVTALRM, GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM,           0},
+  {SIGVTALRM, GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGWINCH
-  {SIGWINCH,  GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_SIZE|GLSA_IGN,  0},
+  {SIGWINCH,  GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
 #ifdef SIGXCPU
-  {SIGXCPU,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM|GLSA_CORE, 0},
+  {SIGXCPU,   GLS_RESTORE_ENV, GLS_CONTINUE, 0},
 #endif
-#ifdef SIGXFSZ
-  {SIGXFSZ,   GLS_RESTORE_ENV,   GLS_CONTINUE, GLSA_TERM|GLSA_CORE, 0},
 #endif
 };
 
@@ -635,30 +526,13 @@ static const struct GlDefSignal {
  * Define file-scope variables for use in signal handlers.
  */
 static volatile sig_atomic_t gl_pending_signal = -1;
+#ifndef __rtems__
 static sigjmp_buf gl_setjmp_buffer;
+#endif
 
 static void gl_signal_handler(int signo);
 
 static int gl_check_caught_signal(GetLine *gl);
-
-/*
- * Respond to an externally caught process suspension or
- * termination signal.
- */
-static void gl_suspend_process(int signo, GetLine *gl, int ngl);
-
-/* Return the default attributes of a given signal */
-
-static int gl_classify_signal(int signo);
-
-/*
- * Unfortunately both terminfo and termcap require one to use the tputs()
- * function to output terminal control characters, and this function
- * doesn't allow one to specify a file stream. As a result, the following
- * file-scope variable is used to pass the current output file stream.
- * This is bad, but there doesn't seem to be any alternative.
- */
-static GetLine *tputs_gl = NULL;
 
 /*
  * Define a tab to be a string of 8 spaces.
@@ -666,9 +540,12 @@ static GetLine *tputs_gl = NULL;
 #define TAB_WIDTH 8
 
 /*
- * Lookup the current size of the terminal.
+ * Does the system send us SIGWINCH signals when the terminal size
+ * changes?
  */
-static void gl_query_size(GetLine *gl, int *ncolumn, int *nline);
+#ifdef USE_SIGWINCH
+static int gl_resize_terminal(GetLine *gl, int redisplay);
+#endif
 
 /*
  * Getline calls this to temporarily override certain signal handlers
@@ -683,28 +560,6 @@ static int gl_override_signal_handlers(GetLine *gl);
 static int gl_restore_signal_handlers(GetLine *gl);
 
 /*
- * Temporarily block the delivery of all signals that gl_get_line()
- * is currently configured to trap.
- */
-static int gl_mask_signals(GetLine *gl, sigset_t *oldset);
-
-/*
- * Restore the process signal mask that was overriden by a previous
- * call to gl_mask_signals().
- */
-static int gl_unmask_signals(GetLine *gl, sigset_t *oldset);
-
-/*
- * Unblock the signals that gl_get_line() has been configured to catch.
- */
-static int gl_catch_signals(GetLine *gl);
-
-/*
- * Return the set of all trappable signals.
- */
-static void gl_list_trappable_signals(sigset_t *signals);
-
-/*
  * Put the terminal into raw input mode, after saving the original
  * terminal attributes in gl->oldattr.
  */
@@ -716,46 +571,15 @@ static int gl_raw_terminal_mode(GetLine *gl);
 static int gl_restore_terminal_attributes(GetLine *gl);
 
 /*
- * Switch to non-blocking I/O if possible.
- */
-static int gl_nonblocking_io(GetLine *gl, int fd);
-
-/*
- * Switch to blocking I/O if possible.
- */
-static int gl_blocking_io(GetLine *gl, int fd);
-
-/*
  * Read a line from the user in raw mode.
  */
-static int gl_get_input_line(GetLine *gl, const char *prompt,
-			     const char *start_line, int start_pos);
+static int gl_get_input_line(GetLine *gl, const char *start_line,
+			     int start_pos);
 
 /*
- * Query the user for a single character.
+ * Set the largest key-sequence that can be handled.
  */
-static int gl_get_query_char(GetLine *gl, const char *prompt, int defchar);
-
-/*
- * Read input from a non-interactive input stream.
- */
-static int gl_read_stream_line(GetLine *gl);
-
-/*
- * Read a single character from a non-interactive input stream.
- */
-static int gl_read_stream_char(GetLine *gl);
-
-/*
- * Prepare to edit a new line.
- */
-static int gl_present_line(GetLine *gl, const char *prompt,
-			   const char *start_line, int start_pos);
-
-/*
- * Reset all line-editing parameters for a new input line.
- */
-static void gl_reset_editor(GetLine *gl);
+#define GL_KEY_MAX 64
 
 /*
  * Handle the receipt of the potential start of a new key-sequence from
@@ -792,35 +616,21 @@ static const char *gl_tgetstr(GetLine *gl, const char *name, char **bufptr);
 /*
  * Output a binary string directly to the terminal.
  */
-static int gl_print_raw_string(GetLine *gl, int buffered,
-			       const char *string, int n);
-
-/*
- * Print an informational message, starting and finishing on new lines.
- * After the list of strings to be printed, the last argument MUST be
- * GL_END_INFO.
- */
-static int gl_print_info(GetLine *gl, ...);
-#define GL_END_INFO ((const char *)0)
-
-/*
- * Start a newline and place the cursor at its start.
- */
-static int gl_start_newline(GetLine *gl, int buffered);
+static int gl_output_raw_string(GetLine *gl, const char *string);
 
 /*
  * Output a terminal control sequence.
  */
-static int gl_print_control_sequence(GetLine *gl, int nline,
-				     const char *string);
+static int gl_output_control_sequence(GetLine *gl, int nline,
+				      const char *string);
 
 /*
  * Output a character or string to the terminal after converting tabs
  * to spaces and control characters to a caret followed by the modified
  * character.
  */
-static int gl_print_char(GetLine *gl, char c, char pad);
-static int gl_print_string(GetLine *gl, const char *string, char pad);
+static int gl_output_char(GetLine *gl, char c, char pad);
+static int gl_output_string(GetLine *gl, const char *string, char pad);
 
 /*
  * Delete nc characters starting from the one under the cursor.
@@ -841,52 +651,10 @@ static int gl_add_char_to_line(GetLine *gl, char c);
 static int gl_add_string_to_line(GetLine *gl, const char *s);
 
 /*
- * Record a new character in the input-line buffer.
- */
-static int gl_buffer_char(GetLine *gl, char c, int bufpos);
-
-/*
- * Record a string in the input-line buffer.
- */
-static int gl_buffer_string(GetLine *gl, const char *s, int n, int bufpos);
-
-/*
- * Make way to insert a string in the input-line buffer.
- */
-static int gl_make_gap_in_buffer(GetLine *gl, int start, int n);
-
-/*
- * Remove characters from the input-line buffer, and move any characters
- * that followed them to the start of the vacated space.
- */
-static void gl_remove_from_buffer(GetLine *gl, int start, int n);
-
-/*
- * Terminate the input-line buffer after a specified number of characters.
- */
-static int gl_truncate_buffer(GetLine *gl, int n);
-
-/*
- * Delete the displayed part of the input line that follows the current
- * terminal cursor position.
- */
-static int gl_truncate_display(GetLine *gl);
-
-/*
- * Accomodate changes to the contents of the input line buffer
- * that weren't made by the above gl_*buffer functions.
- */
-static void gl_update_buffer(GetLine *gl);
-
-/*
  * Read a single character from the terminal.
  */
-static int gl_read_terminal(GetLine *gl, int keep, char *c);
+static int gl_read_character(GetLine *gl, char *c);
 
-/*
- * Discard processed characters from the key-press lookahead buffer.
- */
-static void gl_discard_chars(GetLine *gl, int nused);
 
 /*
  * Move the terminal cursor n positions to the left or right.
@@ -905,15 +673,10 @@ static int gl_set_term_curpos(GetLine *gl, int term_curpos);
 static int gl_place_cursor(GetLine *gl, int buff_curpos);
 
 /*
- * How many characters are needed to write a number as an octal string?
+ * Return the terminal cursor position that corresponds to a given
+ * line buffer cursor position.
  */
-static int gl_octal_width(unsigned num);
-
-/*
- * Return the number of spaces needed to display a tab character at
- * a given location of the terminal.
- */
-static int gl_displayed_tab_width(GetLine *gl, int term_curpos);
+static int gl_buff_curpos_to_term_curpos(GetLine *gl, int buff_curpos);
 
 /*
  * Return the number of terminal characters needed to display a
@@ -927,7 +690,6 @@ static int gl_displayed_char_width(GetLine *gl, char c, int term_curpos);
  */
 static int gl_displayed_string_width(GetLine *gl, const char *string, int nc,
 				     int term_curpos);
-
 /*
  * Return non-zero if 'c' is to be considered part of a word.
  */
@@ -958,8 +720,6 @@ static GLC_GETC_FN(glc_buff_getc);  /* Read from a string */
  */
 static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
 				 const char *origin, KtBinder who, int *lineno);
-static int gl_report_config_error(GetLine *gl, const char *origin, int lineno,
-				  const char *errmsg);
 
 /*
  * Bind the actual arrow key bindings to match those of the symbolic
@@ -971,7 +731,7 @@ static int _gl_bind_arrow_keys(GetLine *gl);
  * Copy the binding of the specified symbolic arrow-key binding to
  * the terminal specific, and default arrow-key key-sequences. 
  */
-static int _gl_rebind_arrow_key(GetLine *gl, const char *name,
+static int _gl_rebind_arrow_key(KeyTab *bindings, const char *name,
 				const char *term_seq,
 				const char *def_seq1,
 				const char *def_seq2);
@@ -988,42 +748,6 @@ static void gl_revert_input(GetLine *gl);
  * Flush unwritten characters to the terminal.
  */
 static int gl_flush_output(GetLine *gl);
-
-/*
- * The callback through which all terminal output is routed.
- * This simply appends characters to a queue buffer, which is
- * subsequently flushed to the output channel by gl_flush_output().
- */
-static GL_WRITE_FN(gl_write_fn);
-
-/*
- * The callback function which the output character queue object
- * calls to transfer characters to the output channel.
- */
-static GL_WRITE_FN(gl_flush_terminal);
-
-/*
- * Enumerate the possible return statuses of gl_read_input().
- */
-typedef enum {
-  GL_READ_OK,      /* A character was read successfully */
-  GL_READ_ERROR,   /* A read-error occurred */
-  GL_READ_BLOCKED, /* The read would have blocked the caller */
-  GL_READ_EOF      /* The end of the current input file was reached */
-} GlReadStatus;
-
-static GlReadStatus gl_read_input(GetLine *gl, char *c);
-/*
- * Private functions of gl_read_input().
- */
-static int gl_event_handler(GetLine *gl, int fd);
-static GlReadStatus gl_read_unmasked(GetLine *gl, int fd, char *c);
-
-
-/*
- * A private function of gl_tty_signals().
- */
-static int gl_set_tty_signal(int signo, void (*handler)(int));
 
 /*
  * Change the editor style being emulated.
@@ -1115,89 +839,9 @@ static int gl_display_prompt(GetLine *gl);
 static int gl_displayed_prompt_width(GetLine *gl);
 
 /*
- * Prepare to return the current input line to the caller of gl_get_line().
+ * Prepare the return the current input line to the caller of gl_get_line().
  */
-static int gl_line_ended(GetLine *gl, int newline_char);
-
-/*
- * Arrange for the input line to be redisplayed when the current contents
- * of the output queue have been flushed.
- */
-static void gl_queue_redisplay(GetLine *gl);
-
-/*
- * Erase the displayed representation of the input line, without
- * touching the buffered copy.
- */
-static int gl_erase_line(GetLine *gl);
-
-/*
- * This function is called whenever the input line has been erased.
- */
-static void gl_line_erased(GetLine *gl);
-
-/*
- * Arrange for the current input line to be discarded.
- */
-void _gl_abandon_line(GetLine *gl);
-
-/*
- * The following are private internally callable versions of pertinent
- * public functions. Unlike their public wrapper functions, they don't
- * block signals while running, and assume that their arguments are valid.
- * They are designed to be called from places where signals are already
- * blocked, and where simple sanity checks have already been applied to
- * their arguments.
- */
-static char *_gl_get_line(GetLine *gl, const char *prompt,
-			  const char *start_line, int start_pos);
-static int _gl_query_char(GetLine *gl, const char *prompt, char defchar);
-static int _gl_read_char(GetLine *gl);
-static int _gl_update_size(GetLine *gl);
-/*
- * Redraw the current input line to account for a change in the terminal
- * size. Also install the new size in gl.
- */
-static int gl_handle_tty_resize(GetLine *gl, int ncolumn, int nline);
-
-static int _gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
-			       const char *term);
-static int _gl_configure_getline(GetLine *gl, const char *app_string,
-				 const char *app_file, const char *user_file);
-static int _gl_save_history(GetLine *gl, const char *filename,
-			    const char *comment, int max_lines);
-static int _gl_load_history(GetLine *gl, const char *filename,
-			    const char *comment);
-static int _gl_watch_fd(GetLine *gl, int fd, GlFdEvent event,
-			GlFdEventFn *callback, void *data);
-static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
-			      GlTerminalSize *size);
-static void _gl_replace_prompt(GetLine *gl, const char *prompt);
-static int _gl_trap_signal(GetLine *gl, int signo, unsigned flags,
-			   GlAfterSignal after, int errno_value);
-static int _gl_raw_io(GetLine *gl, int redisplay);
-static int _gl_normal_io(GetLine *gl);
-static int _gl_completion_action(GetLine *gl, void *data, CplMatchFn *match_fn,
-				 int list_only, const char *name,
-				 const char *keyseq);
-static int _gl_register_action(GetLine *gl, void *data, GlActionFn *fn,
-			       const char *name, const char *keyseq);
-static int _gl_io_mode(GetLine *gl, GlIOMode mode);
-static int _gl_set_term_size(GetLine *gl, int ncolumn, int nline);
-static int _gl_append_history(GetLine *gl, const char *line);
-
-/*
- * Reset the completion status and associated errno value in
- * gl->rtn_status and gl->rtn_errno.
- */
-static void gl_clear_status(GetLine *gl);
-
-/*
- * Record a completion status, unless a previous abnormal completion
- * status has already been recorded for the current call.
- */
-static void gl_record_status(GetLine *gl, GlReturnStatus rtn_status,
-			     int rtn_errno);
+static int gl_line_ended(GetLine *gl, int newline_char, int archive);
 
 /*
  * Set the maximum length of a line in a user's tecla configuration
@@ -1259,14 +903,10 @@ static KT_KEY_FN(gl_history_re_search_backward);
 static KT_KEY_FN(gl_history_search_forward);
 static KT_KEY_FN(gl_history_re_search_forward);
 static KT_KEY_FN(gl_complete_word);
-#ifndef HIDE_FILE_SYSTEM
 static KT_KEY_FN(gl_expand_filename);
-static KT_KEY_FN(gl_read_from_file);
-static KT_KEY_FN(gl_read_init_files);
-static KT_KEY_FN(gl_list_glob);
-#endif
 static KT_KEY_FN(gl_del_char_or_list_or_eof);
 static KT_KEY_FN(gl_list_or_eof);
+static KT_KEY_FN(gl_read_from_file);
 static KT_KEY_FN(gl_beginning_of_history);
 static KT_KEY_FN(gl_end_of_history);
 static KT_KEY_FN(gl_digit_argument);
@@ -1278,6 +918,7 @@ static KT_KEY_FN(gl_change_case);
 static KT_KEY_FN(gl_vi_insert_at_bol);
 static KT_KEY_FN(gl_vi_append_at_eol);
 static KT_KEY_FN(gl_vi_append);
+static KT_KEY_FN(gl_list_glob);
 static KT_KEY_FN(gl_backward_kill_line);
 static KT_KEY_FN(gl_goto_column);
 static KT_KEY_FN(gl_forward_to_word);
@@ -1325,9 +966,8 @@ static KT_KEY_FN(gl_vi_editing_mode);
 static KT_KEY_FN(gl_ring_bell);
 static KT_KEY_FN(gl_vi_repeat_change);
 static KT_KEY_FN(gl_find_parenthesis);
+static KT_KEY_FN(gl_read_init_files);
 static KT_KEY_FN(gl_list_history);
-static KT_KEY_FN(gl_list_completions);
-static KT_KEY_FN(gl_run_external_action);
 
 /*
  * Name the available action functions.
@@ -1378,13 +1018,9 @@ static const struct {const char *name; KT_KEY_FN(*fn);} gl_actions[] = {
   {"history-search-forward",     gl_history_search_forward},
   {"history-re-search-forward",  gl_history_re_search_forward},
   {"complete-word",              gl_complete_word},
-#ifndef HIDE_FILE_SYSTEM
   {"expand-filename",            gl_expand_filename},
-  {"read-from-file",             gl_read_from_file},
-  {"read-init-files",            gl_read_init_files},
-  {"list-glob",                  gl_list_glob},
-#endif
   {"del-char-or-list-or-eof",    gl_del_char_or_list_or_eof},
+  {"read-from-file",             gl_read_from_file},
   {"beginning-of-history",       gl_beginning_of_history},
   {"end-of-history",             gl_end_of_history},
   {"digit-argument",             gl_digit_argument},
@@ -1396,6 +1032,7 @@ static const struct {const char *name; KT_KEY_FN(*fn);} gl_actions[] = {
   {"vi-append-at-eol",           gl_vi_append_at_eol},
   {"vi-append",                  gl_vi_append},
   {"change-case",                gl_change_case},
+  {"list-glob",                  gl_list_glob},
   {"backward-kill-line",         gl_backward_kill_line},
   {"goto-column",                gl_goto_column},
   {"forward-to-word",            gl_forward_to_word},
@@ -1444,6 +1081,7 @@ static const struct {const char *name; KT_KEY_FN(*fn);} gl_actions[] = {
   {"ring-bell",                  gl_ring_bell},
   {"vi-repeat-change",           gl_vi_repeat_change},
   {"find-parenthesis",           gl_find_parenthesis},
+  {"read-init-files",            gl_read_init_files},
   {"list-history",               gl_list_history},
 };
 
@@ -1496,13 +1134,11 @@ static const KtKeyBinding gl_emacs_bindings[] = {
   {"M-n",          "history-search-forward"},
   {"M-N",          "history-search-forward"},
   {"\t",           "complete-word"},
-#ifndef HIDE_FILE_SYSTEM
   {"^X*",          "expand-filename"},
   {"^X^F",         "read-from-file"},
   {"^X^R",         "read-init-files"},
   {"^Xg",          "list-glob"},
   {"^XG",          "list-glob"},
-#endif
   {"^Xh",          "list-history"},
   {"^XH",          "list-history"},
   {"M-<",          "beginning-of-history"},
@@ -1531,9 +1167,7 @@ static const KtKeyBinding gl_emacs_bindings[] = {
  */
 static const KtKeyBinding gl_vi_bindings[] = {
   {"^D",           "list-or-eof"},
-#ifndef HIDE_FILE_SYSTEM
   {"^G",           "list-glob"},
-#endif
   {"^H",           "backward-delete-char"},
   {"\t",           "complete-word"},
   {"\r",           "newline"},
@@ -1544,17 +1178,13 @@ static const KtKeyBinding gl_vi_bindings[] = {
   {"^R",           "redisplay"},
   {"^U",           "backward-kill-line"},
   {"^W",           "backward-delete-word"},
-#ifndef HIDE_FILE_SYSTEM
   {"^X^F",         "read-from-file"},
   {"^X^R",         "read-init-files"},
   {"^X*",          "expand-filename"},
-#endif
   {"^?",           "backward-delete-char"},
   {"M- ",          "cursor-right"},
   {"M-$",          "end-of-line"},
-#ifndef HIDE_FILE_SYSTEM
   {"M-*",          "expand-filename"},
-#endif
   {"M-+",          "down-history"},
   {"M--",          "up-history"},
   {"M-<",          "beginning-of-history"},
@@ -1693,9 +1323,7 @@ static const KtKeyBinding gl_vi_bindings[] = {
   {"M-\r",         "newline"},
   {"M-\t",         "complete-word"},
   {"M-\n",         "newline"},
-#ifndef HIDE_FILE_SYSTEM
   {"M-^X^R",       "read-init-files"},
-#endif
   {"M-^Xh",        "list-history"},
   {"M-^XH",        "list-history"},
   {"down",         "down-history"},
@@ -1722,7 +1350,7 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
  * Check the arguments.
  */
   if(linelen < 10) {
-    errno = ENOMEM;
+    fprintf(stderr, "new_GetLine: Line length too small.\n");
     return NULL;
   };
 /*
@@ -1730,7 +1358,7 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
  */
   gl = (GetLine *) malloc(sizeof(GetLine));
   if(!gl) {
-    errno = ENOMEM;
+    fprintf(stderr, "new_GetLine: Insufficient memory.\n");
     return NULL;
   };
 /*
@@ -1738,66 +1366,52 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
  * container at least up to the point at which it can safely be passed
  * to del_GetLine().
  */
-  gl->err = NULL;
   gl->glh = NULL;
   gl->cpl = NULL;
-#ifndef HIDE_FILE_SYSTEM
-  gl->cplfn.fn = cpl_file_completions;
-#else
-  gl->cplfn.fn = gl_no_completions;
-#endif
-  gl->cplfn.data = NULL;
-#ifndef WITHOUT_FILE_SYSTEM
+  gl->cpl_fn = cpl_file_completions;
+  gl->cpl_data = NULL;
   gl->ef = NULL;
-#endif
   gl->capmem = NULL;
-  gl->cq = NULL;
+  gl->term = NULL;
+  gl->is_term = 0;
   gl->input_fd = -1;
   gl->output_fd = -1;
   gl->input_fp = NULL;
   gl->output_fp = NULL;
   gl->file_fp = NULL;
-  gl->term = NULL;
-  gl->is_term = 0;
-  gl->flush_fn = gl_flush_terminal;
-  gl->io_mode = GL_NORMAL_MODE;
-  gl->raw_mode = 0;
-  gl->pending_io = GLP_WRITE;  /* We will start by writing the prompt */
-  gl_clear_status(gl);
   gl->linelen = linelen;
   gl->line = NULL;
   gl->cutbuf = NULL;
-  gl->prompt = NULL;
+  gl->linelen = linelen;
+  gl->prompt = "";
   gl->prompt_len = 0;
   gl->prompt_changed = 0;
   gl->prompt_style = GL_LITERAL_PROMPT;
-  gl->cpl_mem = NULL;
-  gl->ext_act_mem = NULL;
+  gl->vi.undo.line = NULL;
+  gl->vi.undo.buff_curpos = 0;
+  gl->vi.undo.ntotal = 0;
+  gl->vi.undo.saved = 0;
+  gl->vi.repeat.fn = 0;
+  gl->vi.repeat.count = 0;
+  gl->vi.repeat.input_curpos = 0;
+  gl->vi.repeat.command_curpos = 0;
+  gl->vi.repeat.input_char = '\0';
+  gl->vi.repeat.saved = 0;
+  gl->vi.repeat.active = 0;
   gl->sig_mem = NULL;
   gl->sigs = NULL;
-  gl->signals_masked = 0;
-  gl->signals_overriden = 0;
-  sigemptyset(&gl->all_signal_set);
   sigemptyset(&gl->old_signal_set);
-  sigemptyset(&gl->use_signal_set);
+  sigemptyset(&gl->new_signal_set);
   gl->bindings = NULL;
   gl->ntotal = 0;
   gl->buff_curpos = 0;
   gl->term_curpos = 0;
-  gl->term_len = 0;
   gl->buff_mark = 0;
   gl->insert_curpos = 0;
   gl->insert = 1;
   gl->number = -1;
-  gl->endline = 1;
-  gl->displayed = 0;
-  gl->redisplay = 0;
-  gl->postpone = 0;
-  gl->keybuf[0]='\0';
-  gl->nbuf = 0;
-  gl->nread = 0;
-  gl->current_action.fn = 0;
-  gl->current_action.data = NULL;
+  gl->endline = 0;
+  gl->current_fn = 0;
   gl->current_count = 0;
   gl->preload_id = 0;
   gl->preload_history = 0;
@@ -1805,19 +1419,6 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
   gl->last_search = -1;
   gl->editor = GL_EMACS_MODE;
   gl->silence_bell = 0;
-  gl->automatic_history = 1;
-  gl->vi.undo.line = NULL;
-  gl->vi.undo.buff_curpos = 0;
-  gl->vi.undo.ntotal = 0;
-  gl->vi.undo.saved = 0;
-  gl->vi.repeat.action.fn = 0;
-  gl->vi.repeat.action.data = 0;
-  gl->vi.repeat.count = 0;
-  gl->vi.repeat.input_curpos = 0;
-  gl->vi.repeat.command_curpos = 0;
-  gl->vi.repeat.input_char = '\0';
-  gl->vi.repeat.saved = 0;
-  gl->vi.repeat.active = 0;
   gl->vi.command = 0;
   gl->vi.find_forward = 0;
   gl->vi.find_onto = 0;
@@ -1863,17 +1464,7 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
   FD_ZERO(&gl->wfds);
   FD_ZERO(&gl->ufds);
   gl->max_fd = 0;
-  gl->timer.dt.tv_sec = 0;
-  gl->timer.dt.tv_usec = 0;
-  gl->timer.fn = 0;
-  gl->timer.data = NULL;
 #endif
-/*
- * Allocate an error reporting buffer.
- */
-  gl->err = _new_ErrMsg();
-  if(!gl->err)
-    return del_GetLine(gl);
 /*
  * Allocate the history buffer.
  */
@@ -1889,11 +1480,9 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
 /*
  * Allocate the resource object for file-completion.
  */
-#ifndef WITHOUT_FILE_SYSTEM
   gl->ef = new_ExpandFile();
   if(!gl->ef)
     return del_GetLine(gl);
-#endif
 /*
  * Allocate a string-segment memory allocator for use in storing terminal
  * capablity strings.
@@ -1902,79 +1491,51 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
   if(!gl->capmem)
     return del_GetLine(gl);
 /*
- * Allocate the character queue that is used to buffer terminal output.
- */
-  gl->cq = _new_GlCharQueue();
-  if(!gl->cq)
-    return del_GetLine(gl);
-/*
  * Allocate a line buffer, leaving 2 extra characters for the terminating
  * '\n' and '\0' characters
  */
   gl->line = (char *) malloc(linelen + 2);
   if(!gl->line) {
-    errno = ENOMEM;
+    fprintf(stderr,
+	    "new_GetLine: Insufficient memory to allocate line buffer.\n");
     return del_GetLine(gl);
   };
-/*
- * Start with an empty input line.
- */
-  gl_truncate_buffer(gl, 0);
+  gl->line[0] = '\0';
 /*
  * Allocate a cut buffer.
  */
   gl->cutbuf = (char *) malloc(linelen + 2);
   if(!gl->cutbuf) {
-    errno = ENOMEM;
+    fprintf(stderr,
+	    "new_GetLine: Insufficient memory to allocate cut buffer.\n");
     return del_GetLine(gl);
   };
   gl->cutbuf[0] = '\0';
-/*
- * Allocate an initial empty prompt.
- */
-  _gl_replace_prompt(gl, NULL);
-  if(!gl->prompt) {
-    errno = ENOMEM;
-    return del_GetLine(gl);
-  };
 /*
  * Allocate a vi undo buffer.
  */
   gl->vi.undo.line = (char *) malloc(linelen + 2);
   if(!gl->vi.undo.line) {
-    errno = ENOMEM;
+    fprintf(stderr,
+	    "new_GetLine: Insufficient memory to allocate undo buffer.\n");
     return del_GetLine(gl);
   };
   gl->vi.undo.line[0] = '\0';
 /*
  * Allocate a freelist from which to allocate nodes for the list
- * of completion functions.
- */
-  gl->cpl_mem = _new_FreeList(sizeof(GlCplCallback), GL_CPL_FREELIST_BLOCKING);
-  if(!gl->cpl_mem)
-    return del_GetLine(gl);
-/*
- * Allocate a freelist from which to allocate nodes for the list
- * of external action functions.
- */
-  gl->ext_act_mem = _new_FreeList(sizeof(GlExternalAction),
-				  GL_EXT_ACT_FREELIST_BLOCKING);
-  if(!gl->ext_act_mem)
-    return del_GetLine(gl);
-/*
- * Allocate a freelist from which to allocate nodes for the list
  * of signals.
  */
-  gl->sig_mem = _new_FreeList(sizeof(GlSignalNode), GLS_FREELIST_BLOCKING);
+  gl->sig_mem = _new_FreeList("new_GetLine", sizeof(GlSignalNode),
+			      GLS_FREELIST_BLOCKING);
   if(!gl->sig_mem)
     return del_GetLine(gl);
 /*
- * Install initial dispositions for the default list of signals that
- * gl_get_line() traps.
+ * Install dispositions for the default list of signals that gl_get_line()
+ * traps.
  */
   for(i=0; i<sizeof(gl_signal_list)/sizeof(gl_signal_list[0]); i++) {
     const struct GlDefSignal *sig = gl_signal_list + i;
-    if(_gl_trap_signal(gl, sig->signo, sig->flags, sig->after,
+    if(gl_trap_signal(gl, sig->signo, sig->flags, sig->after,
 		       sig->errno_value))
       return del_GetLine(gl);
   };
@@ -1988,7 +1549,7 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
  * Define the available actions that can be bound to key sequences.
  */
   for(i=0; i<sizeof(gl_actions)/sizeof(gl_actions[0]); i++) {
-    if(_kt_set_action(gl->bindings, gl_actions[i].name, gl_actions[i].fn, NULL))
+    if(_kt_set_action(gl->bindings, gl_actions[i].name, gl_actions[i].fn))
       return del_GetLine(gl);
   };
 /*
@@ -2003,20 +1564,21 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
   gl->tgetent_buf = (char *) malloc(TERMCAP_BUF_SIZE);
   gl->tgetstr_buf = (char *) malloc(TERMCAP_BUF_SIZE);
   if(!gl->tgetent_buf || !gl->tgetstr_buf) {
-    errno = ENOMEM;
+    fprintf(stderr, "new_GetLine: Insufficient memory for termcap buffers.\n");
     return del_GetLine(gl);
   };
 #endif
 /*
  * Set up for I/O assuming stdin and stdout.
  */
-  if(_gl_change_terminal(gl, stdin, stdout, getenv("TERM")))
+  if(gl_change_terminal(gl, stdin, stdout, getenv("TERM")))
     return del_GetLine(gl);
 /*
  * Create a freelist for use in allocating GlFdNode list nodes.
  */
 #ifdef HAVE_SELECT
-  gl->fd_node_mem = _new_FreeList(sizeof(GlFdNode), GLFD_FREELIST_BLOCKING);
+  gl->fd_node_mem = _new_FreeList("new_GetLine", sizeof(GlFdNode),
+				  GLFD_FREELIST_BLOCKING);
   if(!gl->fd_node_mem)
     return del_GetLine(gl);
 #endif
@@ -2037,55 +1599,32 @@ GetLine *new_GetLine(size_t linelen, size_t histlen)
 GetLine *del_GetLine(GetLine *gl)
 {
   if(gl) {
-/*
- * If the terminal is in raw server mode, reset it.
- */
-    _gl_normal_io(gl);
-/*
- * Deallocate all objects contained by gl.
- */
-    gl->err = _del_ErrMsg(gl->err);
     gl->glh = _del_GlHistory(gl->glh);
     gl->cpl = del_WordCompletion(gl->cpl);
-#ifndef WITHOUT_FILE_SYSTEM
     gl->ef = del_ExpandFile(gl->ef);
-#endif
     gl->capmem = _del_StringGroup(gl->capmem);
-    gl->cq = _del_GlCharQueue(gl->cq);
-    if(gl->file_fp)
-      fclose(gl->file_fp);
-    if(gl->term)
-      free(gl->term);
     if(gl->line)
       free(gl->line);
     if(gl->cutbuf)
       free(gl->cutbuf);
-    if(gl->prompt)
-      free(gl->prompt);
-    gl->cpl_mem = _del_FreeList(gl->cpl_mem, 1);
-    gl->ext_act_mem = _del_FreeList(gl->ext_act_mem, 1);
-    gl->sig_mem = _del_FreeList(gl->sig_mem, 1);
-    gl->sigs = NULL;       /* Already freed by freeing sig_mem */
-    gl->bindings = _del_KeyTab(gl->bindings);
     if(gl->vi.undo.line)
       free(gl->vi.undo.line);
+    gl->sig_mem = _del_FreeList(NULL, gl->sig_mem, 1);
+    gl->sigs = NULL;       /* Already freed by freeing sig_mem */
+    gl->bindings = _del_KeyTab(gl->bindings);
 #ifdef USE_TERMCAP
     if(gl->tgetent_buf)
       free(gl->tgetent_buf);
     if(gl->tgetstr_buf)
       free(gl->tgetstr_buf);
 #endif
-    if(gl->app_file)
-      free(gl->app_file);
-    if(gl->user_file)
-      free(gl->user_file);
+    if(gl->file_fp)
+      fclose(gl->file_fp);
+    if(gl->term)
+      free(gl->term);
 #ifdef HAVE_SELECT
-    gl->fd_node_mem = _del_FreeList(gl->fd_node_mem, 1);
-    gl->fd_nodes = NULL;  /* Already freed by freeing gl->fd_node_mem */
+    gl->fd_node_mem = _del_FreeList(NULL, gl->fd_node_mem, 1);
 #endif
-/*
- * Delete the now empty container.
- */
     free(gl);
   };
   return NULL;
@@ -2127,11 +1666,7 @@ static int gl_bind_control_char(GetLine *gl, KtBinder binder, char c,
 /*
  * Install the binding.
  */
-  if(_kt_set_keybinding(gl->bindings, binder, keyseq, action)) {
-    _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-    return 1;
-  };
-  return 0;
+  return _kt_set_keybinding(gl->bindings, binder, keyseq, action);
 }
 
 /*.......................................................................
@@ -2159,52 +1694,41 @@ static int gl_bind_control_char(GetLine *gl, KtBinder binder, char c,
 char *gl_get_line(GetLine *gl, const char *prompt,
 		  const char *start_line, int start_pos)
 {
-  char *retval;   /* The return value of _gl_get_line() */
+  int waserr = 0;    /* True if an error occurs */
 /*
  * Check the arguments.
  */
-  if(!gl) {
-    errno = EINVAL;
+  if(!gl || !prompt) {
+    fprintf(stderr, "gl_get_line: NULL argument(s).\n");
     return NULL;
   };
-/*
- * Temporarily block all of the signals that we have been asked to trap.
- */
-  if(gl_mask_signals(gl, &gl->old_signal_set))
-    return NULL;
-/*
- * Perform the command-line editing task.
- */
-  retval = _gl_get_line(gl, prompt, start_line, start_pos);
-/*
- * Restore the process signal mask to how it was when this function was
- * first called.
- */
-  gl_unmask_signals(gl, &gl->old_signal_set);
-  return retval;
-}
-
-
-/*.......................................................................
- * This is the main body of the public function gl_get_line().
- */
-static char *_gl_get_line(GetLine *gl, const char *prompt,
-			  const char *start_line, int start_pos)
-{
-  int waserr = 0;    /* True if an error occurs */
-/*
- * Assume that this call will successfully complete the input
- * line until proven otherwise.
- */
-  gl_clear_status(gl);
 /*
  * If this is the first call to this function since new_GetLine(),
  * complete any postponed configuration.
  */
   if(!gl->configured) {
-    (void) _gl_configure_getline(gl, NULL, NULL, TECLA_CONFIG_FILE);
+    (void) gl_configure_getline(gl, NULL, NULL, TECLA_CONFIG_FILE);
     gl->configured = 1;
   };
+/*
+ * If input is temporarily being taken from a file, return lines
+ * from the file until the file is exhausted, then revert to
+ * the normal input stream.
+ */
+  if(gl->file_fp) {
+    if(fgets(gl->line, gl->linelen, gl->file_fp))
+      return gl->line;
+    gl_revert_input(gl);
+  };
+/*
+ * Is input coming from a non-interactive source?
+ */
+  if(!gl->is_term)
+    return fgets(gl->line, gl->linelen, gl->input_fp);
+/*
+ * Record the new prompt and its displayed width.
+ */
+  gl_replace_prompt(gl, prompt);
 /*
  * Before installing our signal handler functions, record the fact
  * that there are no pending signals.
@@ -2220,246 +1744,38 @@ static char *_gl_get_line(GetLine *gl, const char *prompt,
  * After recording the current terminal settings, switch the terminal
  * into raw input mode.
  */
-  waserr = waserr || _gl_raw_io(gl, 1);
+  waserr = waserr || gl_raw_terminal_mode(gl);
 /*
- * Attempt to read the line. This will require more than one attempt if
- * either a current temporary input file is opened by gl_get_input_line()
- * or the end of a temporary input file is reached by gl_read_stream_line().
+ * Attempt to read the line.
  */
-  while(!waserr) {
-/*
- * Read a line from a non-interactive stream?
- */
-    if(gl->file_fp || !gl->is_term) {
-      if(gl_read_stream_line(gl)==0) {
-	break;
-      } else if(gl->file_fp) {
-	gl_revert_input(gl);
-	gl_record_status(gl, GLR_NEWLINE, 0);
-      } else {
-	waserr = 1;
-	break;
-      };
-    };
-/*
- * Read from the terminal? Note that the above if() block may have
- * changed gl->file_fp, so it is necessary to retest it here, rather
- * than using an else statement.
- */
-    if(!gl->file_fp && gl->is_term) {
-      if(gl_get_input_line(gl, prompt, start_line, start_pos))
-	waserr = 1;
-      else
-	break;
-    };
-  };
-/*
- * If an error occurred, but gl->rtn_status is still set to
- * GLR_NEWLINE, change the status to GLR_ERROR. Otherwise
- * leave it at whatever specific value was assigned by the function
- * that aborted input. This means that only functions that trap
- * non-generic errors have to remember to update gl->rtn_status
- * themselves.
- */
-  if(waserr && gl->rtn_status == GLR_NEWLINE)
-    gl_record_status(gl, GLR_ERROR, errno);
+  waserr = waserr || gl_get_input_line(gl, start_line, start_pos);
 /*
  * Restore terminal settings.
  */
-  if(gl->io_mode != GL_SERVER_MODE)
-    _gl_normal_io(gl);
+  gl_restore_terminal_attributes(gl);
 /*
  * Restore the signal handlers.
  */
   gl_restore_signal_handlers(gl);
 /*
- * If gl_get_line() gets aborted early, the errno value associated
- * with the event that caused this to happen is recorded in
- * gl->rtn_errno. Since errno may have been overwritten by cleanup
- * functions after this, restore its value to the value that it had
- * when the error condition occured, so that the caller can examine it
- * to find out what happened.
+ * Having restored the program terminal and signal environment,
+ * re-submit any signals that were received.
  */
-  errno = gl->rtn_errno;
-/*
- * Check the completion status to see how to return.
- */
-  switch(gl->rtn_status) {
-  case GLR_NEWLINE:    /* Success */
-    return gl->line;
-  case GLR_BLOCKED:    /* These events abort the current input line, */
-  case GLR_SIGNAL:     /*  when in normal blocking I/O mode, but only */
-  case GLR_TIMEOUT:    /*  temporarily pause line editing when in */
-  case GLR_FDABORT:    /*  non-blocking server I/O mode. */
-    if(gl->io_mode != GL_SERVER_MODE)
-      _gl_abandon_line(gl);
-    return NULL;
-  case GLR_ERROR:      /* Unrecoverable errors abort the input line, */
-  case GLR_EOF:        /*  regardless of the I/O mode. */
-  default:
-    _gl_abandon_line(gl);
-    return NULL;
-  };
-}
-
-/*.......................................................................
- * Read a single character from the user.
- *
- * Input:
- *  gl       GetLine *  A resource object returned by new_GetLine().
- *  prompt      char *  The prompt to prefix the line with, or NULL if
- *                      no prompt is required.
- *  defchar     char    The character to substitute if the
- *                      user simply hits return, or '\n' if you don't
- *                      need to substitute anything.
- * Output:
- *  return       int    The character that was read, or EOF if the read
- *                      had to be aborted (in which case you can call
- *                      gl_return_status() to find out why).
- */
-int gl_query_char(GetLine *gl, const char *prompt, char defchar)
-{
-  int retval;   /* The return value of _gl_query_char() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return EOF;
+  if(gl_pending_signal != -1) {
+    raise(gl_pending_signal);
+    waserr = 1;
   };
 /*
- * Temporarily block all of the signals that we have been asked to trap.
+ * If gl_get_input_line() aborted input due to the user asking to
+ * temporarily read lines from a file, read the first line from
+ * this file.
  */
-  if(gl_mask_signals(gl, &gl->old_signal_set))
-    return EOF;
+  if(!waserr && gl->file_fp)
+    return gl_get_line(gl, prompt, NULL, 0);
 /*
- * Perform the character reading task.
+ * Return the new input line.
  */
-  retval = _gl_query_char(gl, prompt, defchar);
-/*
- * Restore the process signal mask to how it was when this function was
- * first called.
- */
-  gl_unmask_signals(gl, &gl->old_signal_set);
-  return retval;
-}
-
-/*.......................................................................
- * This is the main body of the public function gl_query_char().
- */
-static int _gl_query_char(GetLine *gl, const char *prompt, char defchar)
-{
-  int c = EOF;       /* The character to be returned */
-  int waserr = 0;    /* True if an error occurs */
-/*
- * Assume that this call will successfully complete the input operation
- * until proven otherwise.
- */
-  gl_clear_status(gl);
-/*
- * If this is the first call to this function or gl_get_line(),
- * since new_GetLine(), complete any postponed configuration.
- */
-  if(!gl->configured) {
-    (void) _gl_configure_getline(gl, NULL, NULL, TECLA_CONFIG_FILE);
-    gl->configured = 1;
-  };
-/*
- * Before installing our signal handler functions, record the fact
- * that there are no pending signals.
- */
-  gl_pending_signal = -1;
-/*
- * Temporarily override the signal handlers of the calling program,
- * so that we can intercept signals that would leave the terminal
- * in a bad state.
- */
-  waserr = gl_override_signal_handlers(gl);
-/*
- * After recording the current terminal settings, switch the terminal
- * into raw input mode without redisplaying any partially entered
- * input line.
- */
-  waserr = waserr || _gl_raw_io(gl, 0);
-/*
- * Attempt to read the line. This will require more than one attempt if
- * either a current temporary input file is opened by gl_get_input_line()
- * or the end of a temporary input file is reached by gl_read_stream_line().
- */
-  while(!waserr) {
-/*
- * Read a line from a non-interactive stream?
- */
-    if(gl->file_fp || !gl->is_term) {
-      c = gl_read_stream_char(gl);
-      if(c != EOF) {            /* Success? */
-	if(c=='\n') c = defchar;
-	break;
-      } else if(gl->file_fp) {  /* End of temporary input file? */
-	gl_revert_input(gl);
-	gl_record_status(gl, GLR_NEWLINE, 0);
-      } else {                  /* An error? */
-	waserr = 1;
-	break;
-      };
-    };
-/*
- * Read from the terminal? Note that the above if() block may have
- * changed gl->file_fp, so it is necessary to retest it here, rather
- * than using an else statement.
- */
-    if(!gl->file_fp && gl->is_term) {
-      c = gl_get_query_char(gl, prompt, defchar);
-      if(c==EOF)
-	waserr = 1;
-      else
-	break;
-    };
-  };
-/*
- * If an error occurred, but gl->rtn_status is still set to
- * GLR_NEWLINE, change the status to GLR_ERROR. Otherwise
- * leave it at whatever specific value was assigned by the function
- * that aborted input. This means that only functions that trap
- * non-generic errors have to remember to update gl->rtn_status
- * themselves.
- */
-  if(waserr && gl->rtn_status == GLR_NEWLINE)
-    gl_record_status(gl, GLR_ERROR, errno);
-/*
- * Restore terminal settings.
- */
-  if(gl->io_mode != GL_SERVER_MODE)
-    _gl_normal_io(gl);
-/*
- * Restore the signal handlers.
- */
-  gl_restore_signal_handlers(gl);
-/*
- * If this function gets aborted early, the errno value associated
- * with the event that caused this to happen is recorded in
- * gl->rtn_errno. Since errno may have been overwritten by cleanup
- * functions after this, restore its value to the value that it had
- * when the error condition occured, so that the caller can examine it
- * to find out what happened.
- */
-  errno = gl->rtn_errno;
-/*
- * Error conditions are signalled to the caller, by setting the returned
- * character to EOF.
- */
-  if(gl->rtn_status != GLR_NEWLINE)
-    c = EOF;
-/*
- * In this mode, every character that is read is a completed
- * transaction, just like reading a completed input line, so prepare
- * for the next input line or character.
- */
-  _gl_abandon_line(gl);
-/*
- * Return the acquired character.
- */
-  return c;
+  return waserr ? NULL : gl->line;
 }
 
 /*.......................................................................
@@ -2474,19 +1790,29 @@ static int _gl_query_char(GetLine *gl, const char *prompt, char defchar)
  */
 static int gl_override_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Set up our signal handler.
  */
   SigAction act;
   act.sa_handler = gl_signal_handler;
-  memcpy(&act.sa_mask, &gl->all_signal_set, sizeof(sigset_t));
+  sigemptyset(&act.sa_mask);
   act.sa_flags = 0;
 /*
- * Get the subset of the signals that we are supposed to trap that
- * should actually be trapped.
+ * Get the process signal mask so that we can see which signals the
+ * calling program currently has blocked, and so that we can restore this
+ * mask before returning to the calling program.
  */
-  sigemptyset(&gl->use_signal_set);
+  if(sigprocmask(SIG_SETMASK, NULL, &gl->old_signal_set) == -1) {
+    fprintf(stderr, "gl_get_line(): sigprocmask error: %s\n", strerror(errno));
+    return 1;
+  };
+/*
+ * Form a new process signal mask from the list of signals that we have
+ * been asked to trap.
+ */
+  sigemptyset(&gl->new_signal_set);
   for(sig=gl->sigs; sig; sig=sig->next) {
 /*
  * Trap this signal? If it is blocked by the calling program and we
@@ -2494,37 +1820,41 @@ static int gl_override_signal_handlers(GetLine *gl)
  */
     if(sig->flags & GLS_UNBLOCK_SIG ||
        !sigismember(&gl->old_signal_set, sig->signo)) {
-      if(sigaddset(&gl->use_signal_set, sig->signo) == -1) {
-	_err_record_msg(gl->err, "sigaddset error", END_ERR_MSG);
+      if(sigaddset(&gl->new_signal_set, sig->signo) == -1) {
+	fprintf(stderr, "gl_get_line(): sigaddset error: %s\n",
+		strerror(errno));
 	return 1;
       };
     };
+  };
+/*
+ * Before installing our signal handlers, block all of the signals
+ * that we are going to be trapping.
+ */
+  if(sigprocmask(SIG_BLOCK, &gl->new_signal_set, NULL) == -1) {
+    fprintf(stderr, "gl_get_line(): sigprocmask error: %s\n", strerror(errno));
+    return 1;
   };
 /*
  * Override the actions of the signals that we are trapping.
  */
   for(sig=gl->sigs; sig; sig=sig->next) {
-    if(sigismember(&gl->use_signal_set, sig->signo)) {
-      sigdelset(&act.sa_mask, sig->signo);
-      if(sigaction(sig->signo, &act, &sig->original)) {
-	_err_record_msg(gl->err, "sigaction error", END_ERR_MSG);
-	return 1;
-      };
-      sigaddset(&act.sa_mask, sig->signo);
+    if(sigismember(&gl->new_signal_set, sig->signo) &&
+       sigaction(sig->signo, &act, &sig->original)) {
+      fprintf(stderr, "gl_get_line(): sigaction error: %s\n", strerror(errno));
+      return 1;
     };
   };
-/*
- * Record the fact that the application's signal handlers have now
- * been overriden.
- */
-  gl->signals_overriden = 1;
 /*
  * Just in case a SIGWINCH signal was sent to the process while our
  * SIGWINCH signal handler wasn't in place, check to see if the terminal
  * size needs updating.
  */
-  if(_gl_update_size(gl))
+#endif
+#ifdef USE_SIGWINCH
+  if(gl_resize_terminal(gl, 0))
     return 1;
+#endif
   return 0;
 }
 
@@ -2539,26 +1869,31 @@ static int gl_override_signal_handlers(GetLine *gl)
  */
 static int gl_restore_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Restore application signal handlers that were overriden
  * by gl_override_signal_handlers().
  */
   for(sig=gl->sigs; sig; sig=sig->next) {
-    if(sigismember(&gl->use_signal_set, sig->signo) &&
+    if(sigismember(&gl->new_signal_set, sig->signo) &&
        sigaction(sig->signo, &sig->original, NULL)) {
-      _err_record_msg(gl->err, "sigaction error", END_ERR_MSG);
+      fprintf(stderr, "gl_get_line(): sigaction error: %s\n", strerror(errno));
       return 1;
     };
   };
 /*
- * Record the fact that the application's signal handlers have now
- * been restored.
+ * Restore the original signal mask.
  */
-  gl->signals_overriden = 0;
+  if(sigprocmask(SIG_SETMASK, &gl->old_signal_set, NULL) == -1) {
+    fprintf(stderr, "gl_get_line(): sigprocmask error: %s\n", strerror(errno));
+    return 1;
+  };
+#endif
   return 0;
 }
 
+#ifndef __rtems__
 /*.......................................................................
  * This signal handler simply records the fact that a given signal was
  * caught in the file-scope gl_pending_signal variable.
@@ -2568,6 +1903,7 @@ static void gl_signal_handler(int signo)
   gl_pending_signal = signo;
   siglongjmp(gl_setjmp_buffer, 1);
 }
+#endif
 
 /*.......................................................................
  * Switch the terminal into raw mode after storing the previous terminal
@@ -2583,15 +1919,10 @@ static int gl_raw_terminal_mode(GetLine *gl)
 {
   Termios newattr;   /* The new terminal attributes */
 /*
- * If the terminal is already in raw mode, do nothing.
- */
-  if(gl->raw_mode)
-    return 0;
-/*
  * Record the current terminal attributes.
  */
   if(tcgetattr(gl->input_fd, &gl->oldattr)) {
-    _err_record_msg(gl->err, "tcgetattr error", END_ERR_MSG);
+    fprintf(stderr, "getline(): tcgetattr error: %s\n", strerror(errno));
     return 1;
   };
 /*
@@ -2618,28 +1949,28 @@ static int gl_raw_terminal_mode(GetLine *gl)
  */
   newattr.c_cflag &= ~(CSIZE | PARENB);
   newattr.c_cflag |= CS8;
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
 /*
  * Turn off output processing.
  */
   newattr.c_oflag &= ~(OPOST);
+#endif
 /*
  * Request one byte at a time, without waiting.
  */
-  newattr.c_cc[VMIN] = gl->io_mode==GL_SERVER_MODE ? 0:1;
+  newattr.c_cc[VMIN] = 1;
   newattr.c_cc[VTIME] = 0;
 /*
  * Install the new terminal modes.
  */
   while(tcsetattr(gl->input_fd, TCSADRAIN, &newattr)) {
-    if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
+    if (errno != EINTR) {
+      fprintf(stderr, "getline(): tcsetattr error: %s\n", strerror(errno));
       return 1;
     };
   };
-/*
- * Record the new terminal mode.
- */
-  gl->raw_mode = 1;
   return 0;
 }
 
@@ -2656,11 +1987,6 @@ static int gl_restore_terminal_attributes(GetLine *gl)
 {
   int waserr = 0;
 /*
- * If not in raw mode, do nothing.
- */
-  if(!gl->raw_mode)
-    return 0;
-/*
  * Before changing the terminal attributes, make sure that all output
  * has been passed to the terminal.
  */
@@ -2672,82 +1998,12 @@ static int gl_restore_terminal_attributes(GetLine *gl)
  */
   while(tcsetattr(gl->input_fd, TCSADRAIN, &gl->oldattr)) {
     if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
+      fprintf(stderr, "gl_get_line(): tcsetattr error: %s\n", strerror(errno));
       waserr = 1;
       break;
     };
   };
-/*
- * Record the new terminal mode.
- */
-  gl->raw_mode = 0;
   return waserr;
-}
-
-/*.......................................................................
- * Switch the terminal file descriptor to use non-blocking I/O.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- *  fd             int    The file descriptor to make non-blocking.
- */
-static int gl_nonblocking_io(GetLine *gl, int fd)
-{
-  int fcntl_flags;   /* The new file-descriptor control flags */
-/*
- * Is non-blocking I/O supported on this system?  Note that even
- * without non-blocking I/O, the terminal will probably still act as
- * though it was non-blocking, because we also set the terminal
- * attributes to return immediately if no input is available and we
- * use select() to wait to be able to write. If select() also isn't
- * available, then input will probably remain fine, but output could
- * block, depending on the behaviour of the terminal driver.
- */
-#if defined(NON_BLOCKING_FLAG)
-/*
- * Query the current file-control flags, and add the
- * non-blocking I/O flag.
- */
-  fcntl_flags = fcntl(fd, F_GETFL) | NON_BLOCKING_FLAG;
-/*
- * Install the new control flags.
- */
-  if(fcntl(fd, F_SETFL, fcntl_flags) == -1) {
-    _err_record_msg(gl->err, "fcntl error", END_ERR_MSG);
-    return 1;
-  };
-#endif
-  return 0;
-}
-
-/*.......................................................................
- * Switch to blocking terminal I/O.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- *  fd             int    The file descriptor to make blocking.
- */
-static int gl_blocking_io(GetLine *gl, int fd)
-{
-  int fcntl_flags;   /* The new file-descriptor control flags */
-/*
- * Is non-blocking I/O implemented on this system?
- */
-#if defined(NON_BLOCKING_FLAG)
-/*
- * Query the current file control flags and remove the non-blocking
- * I/O flag.
- */
-  fcntl_flags = fcntl(fd, F_GETFL) & ~NON_BLOCKING_FLAG;
-/*
- * Install the modified control flags.
- */
-  if(fcntl(fd, F_SETFL, fcntl_flags) == -1) {
-    _err_record_msg(gl->err, "fcntl error", END_ERR_MSG);
-    return 1;
-  };
-#endif
-  return 0;
 }
 
 /*.......................................................................
@@ -2755,9 +2011,6 @@ static int gl_blocking_io(GetLine *gl, int fd)
  *
  * Input:
  *  gl         GetLine *  The resource object of this library.
- *  prompt        char *  The prompt to prefix the line with, or NULL to
- *                        use the same prompt that was used by the previous
- *                        line.
  *  start_line    char *  The initial contents of the input line, or NULL
  *                        if it should start out empty.
  *  start_pos      int    If start_line isn't NULL, this specifies the
@@ -2769,34 +2022,91 @@ static int gl_blocking_io(GetLine *gl, int fd)
  *  return    int    0 - OK.
  *                   1 - Error.
  */
-static int gl_get_input_line(GetLine *gl, const char *prompt,
-			     const char *start_line, int start_pos)
+static int gl_get_input_line(GetLine *gl, const char *start_line, int start_pos)
 {
-  char c;               /* The character being read */
+  char c;       /* The character being read */
 /*
- * Flush any pending output to the terminal.
+ * Reset the properties of the line.
  */
-  if(_glq_char_count(gl->cq) > 0 && gl_flush_output(gl))
+  gl->ntotal = 0;
+  gl->buff_curpos = 0;
+  gl->term_curpos = 0;
+  gl->insert_curpos = 0;
+  gl->number = -1;
+  gl->endline = 0;
+  gl->vi.command = 0;
+  gl->vi.undo.line[0] = '\0';
+  gl->vi.undo.ntotal = 0;
+  gl->vi.undo.buff_curpos = 0;
+  gl->vi.repeat.fn = 0;
+  gl->last_signal = -1;
+/*
+ * Reset the history search pointers.
+ */
+  if(_glh_cancel_search(gl->glh))
     return 1;
 /*
- * Are we starting a new line?
+ * Draw the prompt at the start of the line.
  */
-  if(gl->endline) {
+  if(gl_display_prompt(gl))
+    return 1;
 /*
- * Delete any incompletely enterred line.
+ * Present an initial line?
  */
-    if(gl_erase_line(gl))
+  if(start_line) {
+    char *cptr;      /* A pointer into gl->line[] */
+/*
+ * Load the line into the buffer, and display it.
+ */
+    if(start_line != gl->line)
+      strncpy(gl->line, start_line, gl->linelen);
+    gl->line[gl->linelen] = '\0';
+    gl->ntotal = strlen(gl->line);
+/*
+ * Strip off any trailing newline and carriage return characters.
+ */
+    for(cptr=gl->line + gl->ntotal - 1; cptr >= gl->line &&
+	(*cptr=='\n' || *cptr=='\r'); cptr--,gl->ntotal--)
+      ;
+    if(gl->ntotal < 0)
+      gl->ntotal = 0;
+    gl->line[gl->ntotal] = '\0';
+/*
+ * Display the string that remains.
+ */
+    if(gl_output_string(gl, gl->line, '\0'))
       return 1;
 /*
- * Display the new line to be edited.
+ * Where should the cursor be placed within the line?
  */
-    if(gl_present_line(gl, prompt, start_line, start_pos))
-      return 1;
+    if(start_pos < 0 || start_pos > gl->ntotal) {
+      if(gl_place_cursor(gl, gl->ntotal))
+	return 1;
+    } else {
+      if(gl_place_cursor(gl, start_pos))
+	return 1;
+    };
+  } else {
+    gl->line[0] = '\0';
+  };
+/*
+ * Preload a history line?
+ */
+  if(gl->preload_history) {
+    gl->preload_history = 0;
+    if(gl->preload_id) {
+      if(_glh_recall_line(gl->glh, gl->preload_id, gl->line, gl->linelen)) {
+	gl->ntotal = strlen(gl->line);
+	gl->buff_curpos = strlen(gl->line);
+      };
+      gl->preload_id = 0;
+    }; 
+    gl_redisplay(gl, 1);
   };
 /*
  * Read one character at a time.
  */
-  while(gl_read_terminal(gl, 1, &c) == 0) {
+  while(gl_read_character(gl, &c) == 0) {
 /*
  * Increment the count of the number of key sequences entered.
  */
@@ -2818,117 +2128,22 @@ static int gl_get_input_line(GetLine *gl, const char *prompt,
  * Has the line been completed?
  */
     if(gl->endline)
-      return gl_line_ended(gl, c);
+#ifdef LIBTECLA_ACCEPT_NONPRINTING_LINE_END /* still map \r to \n */
+      return gl_line_ended(gl, '\r' != c ? c : '\n' ,
+			   gl->echo && (c=='\n' || c=='\r'));
+#else
+      return gl_line_ended(gl, isprint((int)(unsigned char) c) ? c : '\n' ,
+			   gl->echo && (c=='\n' || c=='\r'));
+#endif
   };
 /*
- * To get here, gl_read_terminal() must have returned non-zero. See
- * whether a signal was caught that requested that the current line
- * be returned.
+ * To get here, gl_read_character() must have returned non-zero. See
+ * if this was because a signal was caught that requested that the
+ * current line be returned.
  */
   if(gl->endline)
-    return gl_line_ended(gl, '\n');
-/*
- * If I/O blocked while attempting to get the latest character
- * of the key sequence, rewind the key buffer to allow interpretation of
- * the current key sequence to be restarted on the next call to this
- * function.
- */
-  if(gl->rtn_status == GLR_BLOCKED && gl->pending_io == GLP_READ)
-    gl->nread = 0;
+    return gl_line_ended(gl, '\n', gl->echo);
   return 1;
-}
-
-/*.......................................................................
- * This is the private function of gl_query_char() that handles
- * prompting the user, reading a character from the terminal, and
- * displaying what the user entered.
- *
- * Input:
- *  gl         GetLine *  The resource object of this library.
- *  prompt        char *  The prompt to prefix the line with.
- *  defchar       char    The character to substitute if the
- *                        user simply hits return, or '\n' if you don't
- *                        need to substitute anything.
- * Output:
- *  return         int    The character that was read, or EOF if something
- *                        prevented a character from being read.
- */
-static int gl_get_query_char(GetLine *gl, const char *prompt, int defchar)
-{
-  char c;               /* The character being read */
-  int retval;           /* The return value of this function */
-/*
- * Flush any pending output to the terminal.
- */
-  if(_glq_char_count(gl->cq) > 0 && gl_flush_output(gl))
-    return EOF;
-/*
- * Delete any incompletely entered line.
- */
-  if(gl_erase_line(gl))
-    return EOF;
-/*
- * Reset the line input parameters and display the prompt, if any.
- */
-  if(gl_present_line(gl, prompt, NULL, 0))
-    return EOF;
-/*
- * Read one character.
- */
-  if(gl_read_terminal(gl, 1, &c) == 0) {
-/*
- * In this mode, count each character as being a new key-sequence.
- */
-    gl->keyseq_count++;
-/*
- * Delete the character that was read, from the key-press buffer.
- */
-    gl_discard_chars(gl, gl->nread);
-/*
- * Convert carriage returns to newlines.
- */
-    if(c == '\r')
-      c = '\n';
-/*
- * If the user just hit return, subsitute the default character.
- */
-    if(c == '\n')
-      c = defchar;
-/*
- * Display the entered character to the right of the prompt.
- */
-    if(c!='\n') {
-      if(gl_end_of_line(gl, 1, NULL)==0)
-	gl_print_char(gl, c, ' ');
-    };
-/*
- * Record the return character, and mark the call as successful.
- */
-    retval = c;
-    gl_record_status(gl, GLR_NEWLINE, 0);
-/*
- * Was a signal caught whose disposition is to cause the current input
- * line to be returned? If so return a newline character.
- */
-  } else if(gl->endline) {
-    retval = '\n';
-    gl_record_status(gl, GLR_NEWLINE, 0);
-  } else {
-    retval = EOF;
-  };
-/*
- * Start a new line.
- */
-  if(gl_start_newline(gl, 1))
-    return EOF;
-/*
- * Attempt to flush any pending output.
- */
-  (void) gl_flush_output(gl);
-/*
- * Return either the character that was read, or EOF if an error occurred.
- */
-  return retval;
 }
 
 /*.......................................................................
@@ -2968,18 +2183,26 @@ static int gl_add_char_to_line(GetLine *gl, char c)
 /*
  * If inserting, make room for the new character.
  */
-    if(buff_curpos < gl->ntotal)
-      gl_make_gap_in_buffer(gl, buff_curpos, 1);
+    if(buff_curpos < gl->ntotal) {
+      memmove(gl->line + buff_curpos + 1, gl->line + buff_curpos,
+	      gl->ntotal - buff_curpos);
+    };
 /*
  * Copy the character into the buffer.
  */
-    gl_buffer_char(gl, c, buff_curpos);
+    gl->line[buff_curpos] = c;
     gl->buff_curpos++;
+/*
+ * If the line was extended, update the record of the string length
+ * and terminate the extended string.
+ */
+    gl->ntotal++;
+    gl->line[gl->ntotal] = '\0';
 /*
  * Redraw the line from the cursor position to the end of the line,
  * and move the cursor to just after the added character.
  */
-    if(gl_print_string(gl, gl->line + buff_curpos, '\0') ||
+    if(gl_output_string(gl, gl->line + buff_curpos, '\0') ||
        gl_set_term_curpos(gl, term_curpos + width))
       return 1;
 /*
@@ -2987,14 +2210,15 @@ static int gl_add_char_to_line(GetLine *gl, char c)
  */
   } else {
 /*
- * Get the width of the character being overwritten.
+ * Get the widths of the character to be overwritten and the character
+ * that is going to replace it.
  */
     int old_width = gl_displayed_char_width(gl, gl->line[buff_curpos],
 					    term_curpos);
 /*
  * Overwrite the character in the buffer.
  */
-    gl_buffer_char(gl, c, buff_curpos);
+    gl->line[buff_curpos] = c;
 /*
  * If we are replacing with a narrower character, we need to
  * redraw the terminal string to the end of the line, then
@@ -3002,12 +2226,12 @@ static int gl_add_char_to_line(GetLine *gl, char c)
  * with spaces.
  */
     if(old_width > width) {
-      if(gl_print_string(gl, gl->line + buff_curpos, '\0'))
+      if(gl_output_string(gl, gl->line + buff_curpos, '\0'))
 	return 1;
 /*
  * Clear to the end of the terminal.
  */
-      if(gl_truncate_display(gl))
+      if(gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
 	return 1;
 /*
  * Move the cursor to the end of the new character.
@@ -3024,7 +2248,7 @@ static int gl_add_char_to_line(GetLine *gl, char c)
  * Redraw the line from the cursor position to the end of the line,
  * and move the cursor to just after the added character.
  */
-      if(gl_print_string(gl, gl->line + buff_curpos, '\0') ||
+      if(gl_output_string(gl, gl->line + buff_curpos, '\0') ||
 	 gl_set_term_curpos(gl, term_curpos + width))
 	return 1;
       gl->buff_curpos++;
@@ -3036,12 +2260,12 @@ static int gl_add_char_to_line(GetLine *gl, char c)
 /*
  * Copy the character into the buffer.
  */
-      gl_buffer_char(gl, c, buff_curpos);
+      gl->line[buff_curpos] = c;
       gl->buff_curpos++;
 /*
  * Overwrite the original character.
  */
-      if(gl_print_char(gl, c, gl->line[gl->buff_curpos]))
+      if(gl_output_char(gl, c, gl->line[gl->buff_curpos]))
 	return 1;
     };
   };
@@ -3086,18 +2310,25 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  * Move the characters that follow the cursor in the buffer by
  * buff_slen characters to the right.
  */
-  if(gl->ntotal > gl->buff_curpos)
-    gl_make_gap_in_buffer(gl, gl->buff_curpos, buff_slen);
+  if(gl->ntotal > gl->buff_curpos) {
+    memmove(gl->line + gl->buff_curpos + buff_slen, gl->line + gl->buff_curpos,
+	    gl->ntotal - gl->buff_curpos);
+  };
 /*
  * Copy the string into the buffer.
  */
-  gl_buffer_string(gl, s, buff_slen, gl->buff_curpos);
+  memcpy(gl->line + gl->buff_curpos, s, buff_slen);
+  gl->ntotal += buff_slen;
   gl->buff_curpos += buff_slen;
+/*
+ * Maintain the buffer properly terminated.
+ */
+  gl->line[gl->ntotal] = '\0';
 /*
  * Write the modified part of the line to the terminal, then move
  * the terminal cursor to the end of the displayed input string.
  */
-  if(gl_print_string(gl, gl->line + buff_curpos, '\0') ||
+  if(gl_output_string(gl, gl->line + buff_curpos, '\0') ||
      gl_set_term_curpos(gl, term_curpos + term_slen))
     return 1;
   return 0;
@@ -3108,13 +2339,6 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  *
  * Input:
  *  gl    GetLine *   The resource object of this library.
- *  keep      int     If true, the returned character will be kept in
- *                    the input buffer, for potential replays. It should
- *                    subsequently be removed from the buffer when the
- *                    key sequence that it belongs to has been fully
- *                    processed, by calling gl_discard_chars().
- * Input/Output:
- *  c        char *   The character that is read, is assigned to *c.
  * Output:
  *  return    int     0 - OK.
  *                    1 - Either an I/O error occurred, or a signal was
@@ -3123,144 +2347,106 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  *                        as though the user had pressed return. In the
  *                        latter case gl->endline will be non-zero.
  */
-static int gl_read_terminal(GetLine *gl, int keep, char *c)
+
+static int gl_read_character(GetLine *gl, char *c)
 {
+#if CONFIG_OPOST_HACK == 1
+Termios attr;
+volatile Termios *pa = 0;
+#endif
+int rval = 1;
 /*
  * Before waiting for a new character to be input, flush unwritten
  * characters to the terminal.
  */
   if(gl_flush_output(gl))
-    return 1;
-/*
- * Record the fact that we are about to read from the terminal.
- */
-  gl->pending_io = GLP_READ;
-/*
- * If there is already an unread character in the buffer,
- * return it.
- */
-  if(gl->nread < gl->nbuf) {
-    *c = gl->keybuf[gl->nread];
-/*
- * Retain the character in the key buffer, but mark it as having been read?
- */
-    if(keep) {
-      gl->nread++;
-/*
- * Completely remove the character from the key buffer?
- */
-    } else {
-      memmove(gl->keybuf + gl->nread, gl->keybuf + gl->nread + 1,
-	      gl->nbuf - gl->nread - 1);
-    };
-    return 0;
-  };
-/*
- * Make sure that there is space in the key buffer for one more character.
- * This should always be true if gl_interpret_char() is called for each
- * new character added, since it will clear the buffer once it has recognized
- * or rejected a key sequence.
- */
-  if(gl->nbuf + 1 > GL_KEY_MAX) {
-    gl_print_info(gl, "gl_read_terminal: Buffer overflow avoided.",
-		  GL_END_INFO);
-    errno = EIO;
-    return 1;
-  };
-/*
- * Read one character from the terminal.
- */
-  switch(gl_read_input(gl, c)) {
-  case GL_READ_OK:
-    break;
-  case GL_READ_BLOCKED:
-    gl_record_status(gl, GLR_BLOCKED, BLOCKED_ERRNO);
-    return 1;
-    break;
-  default:
-    return 1;
-    break;
-  };
-/*
- * Append the character to the key buffer?
- */
-  if(keep) {
-    gl->keybuf[gl->nbuf] = *c;
-    gl->nread = ++gl->nbuf;
-  };
-  return 0;
-}
+    goto cleanup;
 
-/*.......................................................................
- * Read one or more keypresses from the terminal of an input stream.
- * 
- * Input:
- *  gl           GetLine *  The resource object of this module.
- *  c               char *  The character that was read is assigned to *c.
- * Output:
- *  return  GlReadStatus    The completion status of the read operation.
- */
-static GlReadStatus gl_read_input(GetLine *gl, char *c)
-{
+#if CONFIG_OPOST_HACK == 1
+  if (0==tcgetattr(gl->input_fd, &attr)) {
+    attr.c_oflag |= OPOST;
+    tcsetattr(gl->input_fd, TCSADRAIN, &attr);
+    attr.c_oflag &= ~OPOST;
+    pa = &attr;
+  }
+#endif
+
 /*
  * We may have to repeat the read if window change signals are received.
  */
   for(;;) {
 /*
- * Which file descriptor should we read from? Mark this volatile, so
- * that siglongjmp() can't clobber it.
- */
-    volatile int fd = gl->file_fp ? fileno(gl->file_fp) : gl->input_fd;
-/*
  * If the endline flag becomes set, don't wait for another character.
  */
     if(gl->endline)
-      return GL_READ_ERROR;
+      goto cleanup;
 /*
  * Since the code in this function can block, trap signals.
  */
-    if(sigsetjmp(gl_setjmp_buffer, 1)==0) {
-/*
- * Handle the different I/O modes.
- */
-      switch(gl->io_mode) {
-/*
- * In normal I/O mode, we call the event handler before attempting
- * to read, since read() blocks.
- */
-      case GL_NORMAL_MODE:
-	if(gl_event_handler(gl, fd))
-	  return GL_READ_ERROR;
-	return gl_read_unmasked(gl, fd, c);  /* Read one character */
-	break;
-/*
- * In non-blocking server I/O mode, we attempt to read a character,
- * and only if this fails, call the event handler to wait for a any
- * user-configured timeout and any other user-configured events.  In
- * addition, we turn off the fcntl() non-blocking flag when reading
- * from the terminal, to work around a bug in Solaris. We can do this
- * without causing the read() to block, because when in non-blocking
- * server-I/O mode, gl_raw_io() sets the VMIN terminal attribute to 0,
- * which tells the terminal driver to return immediately if no
- * characters are available to be read.
- */
-      case GL_SERVER_MODE:
+#ifndef __rtems__
+    if(sigsetjmp(gl_setjmp_buffer, 1)==0)
+#endif
 	{
-	  GlReadStatus status;        /* The return status */
-	  if(isatty(fd))              /* If we reading from a terminal, */
-	     gl_blocking_io(gl, fd);  /* switch to blocking I/O */
-	  status = gl_read_unmasked(gl, fd, c); /* Try reading */
-	  if(status == GL_READ_BLOCKED) {       /* Nothing readable yet */
-	    if(gl_event_handler(gl, fd))        /* Wait for input */
-	      status = GL_READ_ERROR;
-	    else
-	      status = gl_read_unmasked(gl, fd, c); /* Try reading again */
-	  };
-	  gl_nonblocking_io(gl, fd); /* Restore non-blocking I/O */
-	  return status;
-	};
-	break;
+/*
+ * Unblock the signals that we are trapping.
+ */
+#ifndef __rtems__
+      if(sigprocmask(SIG_UNBLOCK, &gl->new_signal_set, NULL) == -1) {
+	fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
+	goto cleanup;
       };
+#endif
+
+
+/*
+ * If select() is available, watch for activity on any file descriptors
+ * that the user has registered, and for data available on the terminal
+ * file descriptor.
+ */
+#ifdef HAVE_SELECT
+      if(gl_event_handler(gl))
+	goto cleanup;
+#endif
+
+/*
+ * Read one character from the terminal. This could take more
+ * than one call if an interrupt that we aren't trapping is
+ * received.
+ */
+      while(read(gl->input_fd, (void *)c, 1) != 1) {
+	if(errno != EINTR) {
+#ifdef __rtems__
+#ifdef DEBUG
+		printk("read failed; errno %i\n",errno);
+#endif
+		errno=EIO;
+#endif
+#ifdef EAGAIN
+	  if(!errno)          /* This can happen with SysV O_NDELAY */
+	    errno = EAGAIN;
+#endif
+	  goto cleanup;
+	};
+      };
+#ifndef __rtems__
+/*
+ * Block all of the signals that we are trapping.
+ */
+      if(sigprocmask(SIG_BLOCK, &gl->new_signal_set, NULL) == -1) {
+	fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
+	goto cleanup;
+      };
+#else
+#if 0
+	if (4==*c) {
+		printk("C IS FOUR\n");
+		goto cleanup;
+	}
+#endif
+#endif
+
+      rval = 0;
+      goto cleanup;
     };
 /*
  * To get here, one of the signals that we are trapping must have
@@ -3268,83 +2454,18 @@ static GlReadStatus gl_read_input(GetLine *gl, char *c)
  * the signal mask that was blocking these signals will have been
  * reinstated, so we can be sure that no more of these signals will
  * be received until we explicitly unblock them again.
- *
- * First, if non-blocking I/O was temporarily disabled, reinstate it.
  */
-    if(gl->io_mode == GL_SERVER_MODE)
-      gl_nonblocking_io(gl, fd);
-/*
- * Now respond to the signal that was caught.
- */      
     if(gl_check_caught_signal(gl))
-      return GL_READ_ERROR;
+      goto cleanup;
   };
-}
 
-/*.......................................................................
- * This is a private function of gl_read_input(), which unblocks signals
- * temporarily while it reads a single character from the specified file
- * descriptor.
- *
- * Input:
- *  gl          GetLine *  The resource object of this module.
- *  fd              int    The file descriptor to read from.
- *  c              char *  The character that was read is assigned to *c.
- * Output:
- *  return GlReadStatus    The completion status of the read.
- */
-static GlReadStatus gl_read_unmasked(GetLine *gl, int fd, char *c)
-{
-  int nread;  /* The return value of read() */
-/*
- * Unblock the signals that we are trapping, while waiting for I/O.
- */
-  gl_catch_signals(gl);
-/*
- * Attempt to read one character from the terminal, restarting the read
- * if any signals that we aren't trapping, are received.
- */
-  do {
-    errno = 0;
-    nread = read(fd, c, 1);
-  } while(nread < 0 && errno==EINTR);
-/*
- * Block all of the signals that we are trapping.
- */
-  gl_mask_signals(gl, NULL);
-/*
- * Check the completion status of the read.
- */
-  switch(nread) {
-  case 1:
-    return GL_READ_OK;
-  case 0:
-    return (isatty(fd) || errno != 0) ? GL_READ_BLOCKED : GL_READ_EOF;
-  default:
-    return GL_READ_ERROR;
-  };
-}
+cleanup:
+#if CONFIG_OPOST_HACK == 1
+  if (pa)
+    tcsetattr(gl->input_fd, TCSADRAIN, pa);
+#endif
 
-/*.......................................................................
- * Remove a specified number of characters from the start of the 
- * key-press lookahead buffer, gl->keybuf[], and arrange for the next
- * read to start from the character at the start of the shifted buffer.
- *
- * Input:
- *  gl      GetLine *  The resource object of this module.
- *  nused       int    The number of characters to discard from the start
- *                     of the buffer.
- */
-static void gl_discard_chars(GetLine *gl, int nused)
-{
-  int nkeep = gl->nbuf - nused;
-  if(nkeep > 0) {
-    memmove(gl->keybuf, gl->keybuf + nused, nkeep);
-    gl->nbuf = nkeep;
-    gl->nread = 0;
-  } else {
-    gl->nbuf = gl->nread = 0;
-  };
+  return rval;
 }
 
 /*.......................................................................
@@ -3361,87 +2482,51 @@ static int gl_check_caught_signal(GetLine *gl)
 {
   GlSignalNode *sig;      /* The signal disposition */
   SigAction keep_action;  /* The signal disposition of tecla signal handlers */
-  unsigned flags;         /* The signal processing flags to use */
-  int signo;              /* The signal to be handled */
 /*
  * Was no signal caught?
  */
   if(gl_pending_signal == -1)
     return 0;
 /*
- * Get the signal to be handled.
- */
-  signo = gl_pending_signal;
-/*
- * Mark the signal as handled. Note that at this point, all of
- * the signals that we are trapping are blocked from delivery.
- */
-  gl_pending_signal = -1;
-/*
  * Record the signal that was caught, so that the user can query it later.
  */
-  gl->last_signal = signo;
+  gl->last_signal = gl_pending_signal;
 /*
- * In non-blocking server mode, the application is responsible for
- * responding to terminal signals, and we don't want gl_get_line()s
- * normal signal handling to clash with this, so whenever a signal
- * is caught, we arrange for gl_get_line() to abort and requeue the
- * signal while signals are still blocked. If the application
- * had the signal unblocked when gl_get_line() was called, the signal
- * will be delivered again as soon as gl_get_line() restores the
- * process signal mask, just before returning to the application.
- * Note that the caller of this function should set gl->pending_io
- * to the appropriate choice of GLP_READ and GLP_WRITE, before returning.
+ * Did we receive a terminal size signal?
  */
-  if(gl->io_mode==GL_SERVER_MODE) {
-    gl_record_status(gl, GLR_SIGNAL, EINTR);
-    raise(signo);
+#ifdef USE_SIGWINCH
+  if(gl_pending_signal == SIGWINCH && gl_resize_terminal(gl, 1))
     return 1;
-  };
+#endif
 /*
  * Lookup the requested disposition of this signal.
  */
-  for(sig=gl->sigs; sig && sig->signo != signo; sig=sig->next)
+  for(sig=gl->sigs; sig && sig->signo != gl_pending_signal; sig=sig->next)
     ;
   if(!sig)
     return 0;
 /*
- * Get the signal response flags for this signal.
- */
-  flags = sig->flags;
-/*
- * Only perform terminal-specific actions if the session is interactive.
- */
-  if(gl->is_term) {
-/*
- * Did we receive a terminal size signal?
- */
-#ifdef SIGWINCH
-    if(signo == SIGWINCH && _gl_update_size(gl))
-      return 1;
-#endif
-/*
  * Start a fresh line?
  */
-    if(flags & GLS_RESTORE_LINE) {
-      if(gl_start_newline(gl, 0))
-	return 1;
-    };
+  if(sig->flags & GLS_RESTORE_LINE) {
+    if(gl_set_term_curpos(gl, gl_buff_curpos_to_term_curpos(gl, gl->ntotal)) ||
+       gl_output_raw_string(gl, "\r\n"))
+      return 1;
+  };
 /*
  * Restore terminal settings to how they were before gl_get_line() was
  * called?
  */
-    if(flags & GLS_RESTORE_TTY)
-      gl_restore_terminal_attributes(gl);
-  };
+  if(sig->flags & GLS_RESTORE_TTY)
+    gl_restore_terminal_attributes(gl);
+#ifndef __rtems__
 /*
  * Restore signal handlers to how they were before gl_get_line() was
  * called? If this hasn't been requested, only reinstate the signal
  * handler of the signal that we are handling.
  */
-  if(flags & GLS_RESTORE_SIG) {
+  if(sig->flags & GLS_RESTORE_SIG) {
     gl_restore_signal_handlers(gl);
-    gl_unmask_signals(gl, &gl->old_signal_set);
   } else {
     (void) sigaction(sig->signo, &sig->original, &keep_action);
     (void) sigprocmask(SIG_UNBLOCK, &sig->proc_mask, NULL);
@@ -3449,50 +2534,47 @@ static int gl_check_caught_signal(GetLine *gl)
 /*
  * Forward the signal to the application's signal handler.
  */
-  if(!(flags & GLS_DONT_FORWARD))
-    raise(signo);
+  if(!(sig->flags & GLS_DONT_FORWARD))
+    raise(gl_pending_signal);
+  gl_pending_signal = -1;
 /*
  * Reinstate our signal handlers.
  */
-  if(flags & GLS_RESTORE_SIG) {
-    gl_mask_signals(gl, NULL);
+  if(sig->flags & GLS_RESTORE_SIG) {
     gl_override_signal_handlers(gl);
   } else {
     (void) sigaction(sig->signo, &keep_action, NULL);
     (void) sigprocmask(SIG_BLOCK, &sig->proc_mask, NULL);
   };
 /*
- * Prepare the terminal for continued editing, if this is an interactive
- * session.
- */
-  if(gl->is_term) {
-/*
  * Do we need to reinstate our terminal settings?
  */
-    if(flags & GLS_RESTORE_TTY)
-      gl_raw_terminal_mode(gl);
+  if(sig->flags & GLS_RESTORE_TTY)
+    gl_raw_terminal_mode(gl);
 /*
  * Redraw the line?
  */
-    if(flags & GLS_REDRAW_LINE)
-      gl_queue_redisplay(gl);
-  };
+  if(sig->flags & GLS_REDRAW_LINE && gl_redisplay(gl, 1))
+    return 1;
+/*
+ * Set errno.
+ */
+  errno = sig->errno_value;
 /*
  * What next?
  */
   switch(sig->after) {
   case GLS_RETURN:
-    gl_newline(gl, 1, NULL);
-    return gl->is_term && gl_flush_output(gl);
+    return gl_newline(gl, 1);
     break;
   case GLS_ABORT:
-    gl_record_status(gl, GLR_SIGNAL, sig->errno_value);
     return 1;
     break;
   case GLS_CONTINUE:
-    return gl->is_term && gl_flush_output(gl);
+    return 0;
     break;
   };
+#endif
   return 0;
 }
 
@@ -3543,34 +2625,31 @@ static int gl_control_strings(GetLine *gl, const char *term)
  * database.
  */
 #ifdef USE_TERMINFO
-  {
-    int errret;
-    if(!term || setupterm((char *)term, gl->input_fd, &errret) == ERR) {
-      bad_term = 1;
-    } else {
-      _clr_StringGroup(gl->capmem);
-      gl->left = gl_tigetstr(gl, "cub1");
-      gl->right = gl_tigetstr(gl, "cuf1");
-      gl->up = gl_tigetstr(gl, "cuu1");
-      gl->down = gl_tigetstr(gl, "cud1");
-      gl->home = gl_tigetstr(gl, "home");
-      gl->clear_eol = gl_tigetstr(gl, "el");
-      gl->clear_eod = gl_tigetstr(gl, "ed");
-      gl->u_arrow = gl_tigetstr(gl, "kcuu1");
-      gl->d_arrow = gl_tigetstr(gl, "kcud1");
-      gl->l_arrow = gl_tigetstr(gl, "kcub1");
-      gl->r_arrow = gl_tigetstr(gl, "kcuf1");
-      gl->left_n = gl_tigetstr(gl, "cub");
-      gl->right_n = gl_tigetstr(gl, "cuf");
-      gl->sound_bell = gl_tigetstr(gl, "bel");
-      gl->bold = gl_tigetstr(gl, "bold");
-      gl->underline = gl_tigetstr(gl, "smul");
-      gl->standout = gl_tigetstr(gl, "smso");
-      gl->dim = gl_tigetstr(gl, "dim");
-      gl->reverse = gl_tigetstr(gl, "rev");
-      gl->blink = gl_tigetstr(gl, "blink");
-      gl->text_attr_off = gl_tigetstr(gl, "sgr0");
-    };
+  if(!term || setupterm((char *)term, gl->input_fd, NULL) == ERR) {
+    bad_term = 1;
+  } else {
+    _clr_StringGroup(gl->capmem);
+    gl->left = gl_tigetstr(gl, "cub1");
+    gl->right = gl_tigetstr(gl, "cuf1");
+    gl->up = gl_tigetstr(gl, "cuu1");
+    gl->down = gl_tigetstr(gl, "cud1");
+    gl->home = gl_tigetstr(gl, "home");
+    gl->clear_eol = gl_tigetstr(gl, "el");
+    gl->clear_eod = gl_tigetstr(gl, "ed");
+    gl->u_arrow = gl_tigetstr(gl, "kcuu1");
+    gl->d_arrow = gl_tigetstr(gl, "kcud1");
+    gl->l_arrow = gl_tigetstr(gl, "kcub1");
+    gl->r_arrow = gl_tigetstr(gl, "kcuf1");
+    gl->left_n = gl_tigetstr(gl, "cub");
+    gl->right_n = gl_tigetstr(gl, "cuf");
+    gl->sound_bell = gl_tigetstr(gl, "bel");
+    gl->bold = gl_tigetstr(gl, "bold");
+    gl->underline = gl_tigetstr(gl, "smul");
+    gl->standout = gl_tigetstr(gl, "smso");
+    gl->dim = gl_tigetstr(gl, "dim");
+    gl->reverse = gl_tigetstr(gl, "rev");
+    gl->blink = gl_tigetstr(gl, "blink");
+    gl->text_attr_off = gl_tigetstr(gl, "sgr0");
   };
 #elif defined(USE_TERMCAP)
   if(!term || tgetent(gl->tgetent_buf, (char *)term) < 0) {
@@ -3603,8 +2682,8 @@ static int gl_control_strings(GetLine *gl, const char *term)
  * Report term being unusable.
  */
   if(bad_term) {
-    gl_print_info(gl, "Bad terminal type: \"", term ? term : "(null)",
-		  "\". Will assume vt100.", GL_END_INFO);
+    fprintf(stderr, "Bad terminal type: \"%s\". Will assume vt100.\n",
+	    term ? term : "(null)");
   };
 /*
  * Fill in missing information with ANSI VT100 strings.
@@ -3649,10 +2728,6 @@ static int gl_control_strings(GetLine *gl, const char *term)
     gl->blink = GL_ESC_STR "[5m";
   if(!gl->text_attr_off)
     gl->text_attr_off = GL_ESC_STR "[m";
-/*
- * Find out the current terminal size.
- */
-  (void) _gl_terminal_size(gl, GL_DEF_NCOLUMN, GL_DEF_NLINE, NULL);
   return 0;
 }
 
@@ -3732,7 +2807,9 @@ static KT_KEY_FN(gl_abort)
  */
 static KT_KEY_FN(gl_suspend)
 {
+#ifdef SIGTSTP
   raise(SIGTSTP);
+#endif
   return 0;
 }
 
@@ -3765,7 +2842,7 @@ static KT_KEY_FN(gl_literal_next)
 /*
  * Get the character to be inserted literally.
  */
-  if(gl_read_terminal(gl, 1, &c))
+  if(gl_read_character(gl, &c))
     return 1;
 /*
  * Add the character to the line 'count' times.
@@ -3773,23 +2850,6 @@ static KT_KEY_FN(gl_literal_next)
   for(i=0; i<count; i++)
     gl_add_char_to_line(gl, c);
   return 0;
-}
-
-/*.......................................................................
- * Return the width of a tab character at a given position when
- * displayed at a given position on the terminal. This is needed
- * because the width of tab characters depends on where they are,
- * relative to the preceding tab stops.
- *
- * Input:
- *  gl       GetLine *  The resource object of this library.
- *  term_curpos  int    The destination terminal location of the character.
- * Output:
- *  return       int    The number of terminal charaters needed.
- */
-static int gl_displayed_tab_width(GetLine *gl, int term_curpos)
-{
-  return TAB_WIDTH - ((term_curpos % gl->ncolumn) % TAB_WIDTH);
 }
 
 /*.......................................................................
@@ -3811,14 +2871,16 @@ static int gl_displayed_tab_width(GetLine *gl, int term_curpos)
 static int gl_displayed_char_width(GetLine *gl, char c, int term_curpos)
 {
   if(c=='\t')
-    return gl_displayed_tab_width(gl, term_curpos);
+    return TAB_WIDTH - ((term_curpos % gl->ncolumn) % TAB_WIDTH);
   if(IS_CTRL_CHAR(c))
     return 2;
-  if(!isprint((int)(unsigned char) c))
-    return gl_octal_width((int)(unsigned char)c) + 1;
+  if(!isprint((int)(unsigned char) c)) {
+    char string[TAB_WIDTH + 4];
+    sprintf(string, "\\%o", (int)(unsigned char)c);
+    return strlen(string);
+  };
   return 1;
 }
-
 
 /*.......................................................................
  * Work out the length of given string of characters on the terminal.
@@ -3838,7 +2900,7 @@ static int gl_displayed_char_width(GetLine *gl, char c, int term_curpos)
 static int gl_displayed_string_width(GetLine *gl, const char *string, int nc,
 				     int term_curpos)
 {
-  int slen = 0;   /* The displayed number of characters */
+  int slen=0;   /* The displayed number of characters */
   int i;
 /*
  * How many characters are to be measured?
@@ -3854,52 +2916,35 @@ static int gl_displayed_string_width(GetLine *gl, const char *string, int nc,
 }
 
 /*.......................................................................
- * Write a string verbatim to the current terminal or output stream.
- *
- * Note that when async-signal safety is required, the 'buffered'
- * argument must be 0, and n must not be -1.
+ * Write a string directly to the terminal.
  *
  * Input:
- *  gl         GetLine *  The resource object of the gl_get_line().
- *  buffered       int    If true, used buffered I/O when writing to
- *                        the terminal. Otherwise use async-signal-safe
- *                        unbuffered I/O.
- *  string  const char *  The string to be written (this need not be
- *                        '\0' terminated unless n<0).
- *  n              int    The number of characters to write from the
- *                        prefix of string[], or -1 to request that
- *                        gl_print_raw_string() use strlen() to figure
- *                        out the length.
+ *  gl     GetLine *   The resource object of this program.
+ *  string    char *   The string to be written.
  * Output:
- *  return         int    0 - OK.
- *                        1 - Error.
+ *  return     int     0 - OK.
+ *                     1 - Error.
  */
-static int gl_print_raw_string(GetLine *gl, int buffered,
-			       const char *string, int n)
+static int gl_output_raw_string(GetLine *gl, const char *string)
 {
-  GlWriteFn *write_fn = buffered ? gl_write_fn : gl->flush_fn;
-/*
- * Only display output when echoing is turned on.
- */
   if(gl->echo) {
     int ndone = 0;   /* The number of characters written so far */
 /*
- * When using un-buffered I/O, flush pending output first.
+ * How long is the string to be written?
  */
-    if(!buffered) {
-      if(gl_flush_output(gl))
+    int slen = strlen(string);
+/*
+ * Attempt to write the string to the terminal, restarting the
+ * write if a signal is caught.
+ */
+    while(ndone < slen) {
+      int nnew = fwrite(string + ndone, sizeof(char), slen-ndone,
+			gl->output_fp);
+      if(nnew > 0)
+	ndone += nnew;
+      else if(errno != EINTR)
 	return 1;
     };
-/*
- * If no length has been provided, measure the length of the string.
- */
-    if(n < 0)
-      n = strlen(string);
-/*
- * Write the string.
- */
-    if(write_fn(gl, string + ndone, n-ndone) != n)
-      return 1;
   };
   return 0;
 }
@@ -3918,40 +2963,21 @@ static int gl_print_raw_string(GetLine *gl, int buffered,
  *  return     int     0 - OK.
  *                     1 - Error.
  */
-static int gl_print_control_sequence(GetLine *gl, int nline, const char *string)
+static int gl_output_control_sequence(GetLine *gl, int nline,
+				      const char *string)
 {
-  int waserr = 0;   /* True if an error occurs */
-/*
- * Only write characters to the terminal when echoing is enabled.
- */
   if(gl->echo) {
 #if defined(USE_TERMINFO) || defined(USE_TERMCAP)
-    tputs_gl = gl;
+    tputs_fp = gl->output_fp;
     errno = 0;
     tputs((char *)string, nline, gl_tputs_putchar);
-    waserr = errno != 0;
+    return errno != 0;
 #else
-    waserr = gl_print_raw_string(gl, 1, string, -1);
+    return gl_output_raw_string(gl, string);
 #endif
   };
-  return waserr;
+  return 0;
 }
-
-#if defined(USE_TERMINFO) || defined(USE_TERMCAP)
-/*.......................................................................
- * The following callback function is called by tputs() to output a raw
- * control character to the terminal.
- */
-static TputsRetType gl_tputs_putchar(TputsArgType c)
-{
-  char ch = c;
-#if TPUTS_RETURNS_VALUE
-  return gl_print_raw_string(tputs_gl, 1, &ch, 1);
-#else
-  (void) gl_print_raw_string(tputs_gl, 1, &ch, 1);
-#endif
-}
-#endif
 
 /*.......................................................................
  * Move the terminal cursor n characters to the left or right.
@@ -3970,13 +2996,6 @@ static int gl_terminal_move_cursor(GetLine *gl, int n)
   int new_row, new_col; /* The target terminal row and column index of */
                         /*  the cursor wrt the start of the input line. */
 /*
- * Do nothing if the input line isn't currently displayed. In this
- * case, the cursor will be moved to the right place when the line
- * is next redisplayed.
- */
-  if(!gl->displayed)
-    return 0;
-/*
  * How far can we move left?
  */
   if(gl->term_curpos + n < 0)
@@ -3992,14 +3011,14 @@ static int gl_terminal_move_cursor(GetLine *gl, int n)
  * Move down to the next line.
  */
   for(; cur_row < new_row; cur_row++) {
-    if(gl_print_control_sequence(gl, 1, gl->down))
+    if(gl_output_control_sequence(gl, 1, gl->down))
       return 1;
   };
 /*
  * Move up to the previous line.
  */
   for(; cur_row > new_row; cur_row--) {
-    if(gl_print_control_sequence(gl, 1, gl->up))
+    if(gl_output_control_sequence(gl, 1, gl->up))
       return 1;
   };
 /*
@@ -4012,14 +3031,14 @@ static int gl_terminal_move_cursor(GetLine *gl, int n)
  * characters (guess based on ANSI terminal termcap entry).
  */
     if(gl->right_n != NULL && new_col - cur_col > 1) {
-      if(gl_print_control_sequence(gl, 1, tparm((char *)gl->right_n,
+      if(gl_output_control_sequence(gl, 1, tparm((char *)gl->right_n,
            (long)(new_col - cur_col), 0l, 0l, 0l, 0l, 0l, 0l, 0l, 0l)))
 	return 1;
     } else
 #endif
     {
       for(; cur_col < new_col; cur_col++) {
-        if(gl_print_control_sequence(gl, 1, gl->right))
+        if(gl_output_control_sequence(gl, 1, gl->right))
           return 1;
       };
     };
@@ -4033,14 +3052,14 @@ static int gl_terminal_move_cursor(GetLine *gl, int n)
  * characters (guess based on ANSI terminal termcap entry).
  */
     if(gl->left_n != NULL && cur_col - new_col > 3) {
-      if(gl_print_control_sequence(gl, 1, tparm((char *)gl->left_n,
+      if(gl_output_control_sequence(gl, 1, tparm((char *)gl->left_n,
            (long)(cur_col - new_col), 0l, 0l, 0l, 0l, 0l, 0l, 0l, 0l)))
 	return 1;
     } else
 #endif
     {
       for(; cur_col > new_col; cur_col--) {
-        if(gl_print_control_sequence(gl, 1, gl->left))
+        if(gl_output_control_sequence(gl, 1, gl->left))
           return 1;
       };
     };
@@ -4074,7 +3093,7 @@ static int gl_terminal_move_cursor(GetLine *gl, int n)
  * Output:
  *  return    int     0 - OK.
  */ 
-static int gl_print_char(GetLine *gl, char c, char pad)
+static int gl_output_char(GetLine *gl, char c, char pad)
 {
   char string[TAB_WIDTH + 4]; /* A work area for composing compound strings */
   int nchar;                  /* The number of terminal characters */
@@ -4087,7 +3106,7 @@ static int gl_print_char(GetLine *gl, char c, char pad)
  * How many spaces do we need to represent a tab at the current terminal
  * column?
  */
-    nchar = gl_displayed_tab_width(gl, gl->term_curpos);
+    nchar = gl_displayed_char_width(gl, '\t', gl->term_curpos);
 /*
  * Compose the tab string.
  */
@@ -4111,19 +3130,13 @@ static int gl_print_char(GetLine *gl, char c, char pad)
 /*
  * Write the string to the terminal.
  */
-  if(gl_print_raw_string(gl, 1, string, -1))
+  if(gl_output_raw_string(gl, string))
     return 1;
 /*
  * Except for one exception to be described in a moment, the cursor should
  * now have been positioned after the character that was just output.
  */
   gl->term_curpos += nchar;
-/*
- * Keep a record of the number of characters in the terminal version
- * of the input line.
- */
-  if(gl->term_curpos > gl->term_len)
-    gl->term_len = gl->term_curpos;
 /*
  * If the new character ended exactly at the end of a line,
  * most terminals won't move the cursor onto the next line until we
@@ -4132,7 +3145,7 @@ static int gl_print_char(GetLine *gl, char c, char pad)
  */
   if(gl->term_curpos % gl->ncolumn == 0) {
     int term_curpos = gl->term_curpos;
-    if(gl_print_char(gl, pad ? pad : ' ', ' ') ||
+    if(gl_output_char(gl, pad ? pad : ' ', ' ') ||
        gl_set_term_curpos(gl, term_curpos))
       return 1;
   };
@@ -4161,15 +3174,32 @@ static int gl_print_char(GetLine *gl, char c, char pad)
  * Output:
  *  return    int     0 - OK.
  */
-static int gl_print_string(GetLine *gl, const char *string, char pad)
+static int gl_output_string(GetLine *gl, const char *string, char pad)
 {
   const char *cptr;   /* A pointer into string[] */
   for(cptr=string; *cptr; cptr++) {
     char nextc = cptr[1];
-    if(gl_print_char(gl, *cptr, nextc ? nextc : pad))
+    if(gl_output_char(gl, *cptr, nextc ? nextc : pad))
       return 1;
   };
   return 0;
+}
+
+/*.......................................................................
+ * Given a character position within gl->line[], work out the
+ * corresponding gl->term_curpos position on the terminal.
+ *
+ * Input:
+ *  gl      GetLine *   The resource object of this library.
+ *  buff_curpos int     The position within gl->line[].
+ *  
+ * Output:
+ *  return      int     The gl->term_curpos position on the terminal.
+ */
+static int gl_buff_curpos_to_term_curpos(GetLine *gl, int buff_curpos)
+{
+  return gl->prompt_len + gl_displayed_string_width(gl, gl->line, buff_curpos,
+						    gl->prompt_len);
 }
 
 /*.......................................................................
@@ -4251,7 +3281,8 @@ static KT_KEY_FN(gl_delete_line)
 /*
  * Clear the buffer.
  */
-  gl_truncate_buffer(gl, 0);
+  gl->ntotal = 0;
+  gl->line[0] = '\0';
 /*
  * Move the terminal cursor to just after the prompt.
  */
@@ -4260,7 +3291,7 @@ static KT_KEY_FN(gl_delete_line)
 /*
  * Clear from the end of the prompt to the end of the terminal.
  */
-  if(gl_truncate_display(gl))
+  if(gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
     return 1;
   return 0;
 }
@@ -4283,11 +3314,12 @@ static KT_KEY_FN(gl_kill_line)
 /*
  * Terminate the buffered line at the current cursor position.
  */
-  gl_truncate_buffer(gl, gl->buff_curpos);
+  gl->ntotal = gl->buff_curpos;
+  gl->line[gl->ntotal] = '\0';
 /*
  * Clear the part of the line that follows the cursor.
  */
-  if(gl_truncate_display(gl))
+  if(gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
     return 1;
 /*
  * Explicitly reset the cursor position to allow vi command mode
@@ -4393,10 +3425,9 @@ static int gl_delete_chars(GetLine *gl, int nc, int cut)
 /*
  * Restore any available characters.
  */
-    if(nrestore > 0) {
-      gl_buffer_string(gl, gl->vi.undo.line + gl->buff_curpos, nrestore,
-		       gl->buff_curpos);
-    };
+    if(nrestore > 0)
+      memcpy(gl->line + gl->buff_curpos, gl->vi.undo.line + gl->buff_curpos,
+             nrestore);
 /*
  * If their were insufficient characters in the undo buffer, then this
  * implies that we are deleting from the end of the line, so we need
@@ -4405,24 +3436,27 @@ static int gl_delete_chars(GetLine *gl, int nc, int cut)
  * cursor position.
  */
     if(nc != nrestore) {
-      gl_truncate_buffer(gl, (gl->vi.undo.ntotal > gl->buff_curpos) ?
-			 gl->vi.undo.ntotal : gl->buff_curpos);
+      gl->ntotal = gl->vi.undo.ntotal > gl->buff_curpos ? gl->vi.undo.ntotal :
+	gl->buff_curpos;
+      gl->line[gl->ntotal] = '\0';
     };
   } else {
 /*
  * Copy the remaining part of the line back over the deleted characters.
  */
-    gl_remove_from_buffer(gl, gl->buff_curpos, nc);
+    memmove(gl->line + gl->buff_curpos, gl->line + gl->buff_curpos + nc,
+	    gl->ntotal - gl->buff_curpos - nc + 1);
+    gl->ntotal -= nc;
   };
 /*
  * Redraw the remaining characters following the cursor.
  */
-  if(gl_print_string(gl, gl->line + gl->buff_curpos, '\0'))
+  if(gl_output_string(gl, gl->line + gl->buff_curpos, '\0'))
     return 1;
 /*
  * Clear to the end of the terminal.
  */
-  if(gl_truncate_display(gl))
+  if(gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
     return 1;
 /*
  * Place the cursor at the start of where the deletion was performed.
@@ -4459,7 +3493,7 @@ static KT_KEY_FN(gl_backward_delete_char)
  * use by vi-undo.
  */
   gl_save_for_undo(gl);
-  return gl_cursor_left(gl, count, NULL) ||
+  return gl_cursor_left(gl, count) ||
     gl_delete_chars(gl, count, gl->vi.command);
 }
 
@@ -4469,9 +3503,9 @@ static KT_KEY_FN(gl_backward_delete_char)
 static KT_KEY_FN(gl_delete_to_column)
 {
   if (--count >= gl->buff_curpos)
-    return gl_forward_delete_char(gl, count - gl->buff_curpos, NULL);
+    return gl_forward_delete_char(gl, count - gl->buff_curpos);
   else
-    return gl_backward_delete_char(gl, gl->buff_curpos - count, NULL);
+    return gl_backward_delete_char(gl, gl->buff_curpos - count);
 }
 
 /*.......................................................................
@@ -4484,9 +3518,9 @@ static KT_KEY_FN(gl_delete_to_parenthesis)
   if(curpos >= 0) {
     gl_save_for_undo(gl);
     if(curpos >= gl->buff_curpos)
-      return gl_forward_delete_char(gl, curpos - gl->buff_curpos + 1, NULL);
+      return gl_forward_delete_char(gl, curpos - gl->buff_curpos + 1);
     else
-      return gl_backward_delete_char(gl, ++gl->buff_curpos - curpos + 1, NULL);
+      return gl_backward_delete_char(gl, ++gl->buff_curpos - curpos + 1);
   };
   return 0;
 }
@@ -4534,7 +3568,7 @@ static KT_KEY_FN(gl_backward_delete_word)
 /*
  * Move back 'count' words.
  */
-  if(gl_backward_word(gl, count, NULL))
+  if(gl_backward_word(gl, count))
     return 1;
 /*
  * Delete from the new cursor position to the original one.
@@ -4600,7 +3634,7 @@ static int gl_delete_find(GetLine *gl, int count, char c, int forward,
 /*
  * If this is a change operation, switch the insert mode.
  */
-  if(change && gl_vi_insert(gl, 0, NULL))
+  if(change && gl_vi_insert(gl, 0))
     return 1;
   return 0;
 }
@@ -4680,18 +3714,17 @@ static KT_KEY_FN(gl_upcase_word)
  * Upcase characters from the current cursor position to 'last'.
  */
   while(gl->buff_curpos <= last) {
-    char *cptr = gl->line + gl->buff_curpos;
+    char *cptr = gl->line + gl->buff_curpos++;
 /*
  * Convert the character to upper case?
  */
     if(islower((int)(unsigned char) *cptr))
-      gl_buffer_char(gl, toupper((int) *cptr), gl->buff_curpos);
-    gl->buff_curpos++;
+      *cptr = toupper((int) *cptr);
 /*
  * Write the possibly modified character back. Note that for non-modified
  * characters we want to do this as well, so as to advance the cursor.
  */
-    if(gl_print_char(gl, *cptr, cptr[1]))
+    if(gl_output_char(gl, *cptr, cptr[1]))
       return 1;
   };
   return gl_place_cursor(gl, gl->buff_curpos);	/* bounds check */
@@ -4716,18 +3749,17 @@ static KT_KEY_FN(gl_downcase_word)
  * Upcase characters from the current cursor position to 'last'.
  */
   while(gl->buff_curpos <= last) {
-    char *cptr = gl->line + gl->buff_curpos;
+    char *cptr = gl->line + gl->buff_curpos++;
 /*
  * Convert the character to upper case?
  */
     if(isupper((int)(unsigned char) *cptr))
-      gl_buffer_char(gl, tolower((int) *cptr), gl->buff_curpos);
-    gl->buff_curpos++;
+      *cptr = tolower((int) *cptr);
 /*
  * Write the possibly modified character back. Note that for non-modified
  * characters we want to do this as well, so as to advance the cursor.
  */
-    if(gl_print_char(gl, *cptr, cptr[1]))
+    if(gl_output_char(gl, *cptr, cptr[1]))
       return 1;
   };
   return gl_place_cursor(gl, gl->buff_curpos);	/* bounds check */
@@ -4783,17 +3815,17 @@ static KT_KEY_FN(gl_capitalize_word)
  */
       if(first) {
 	if(islower((int)(unsigned char) *cptr))
-	  gl_buffer_char(gl, toupper((int) *cptr), cptr - gl->line);
+	  *cptr = toupper((int) *cptr);
       } else {
 	if(isupper((int)(unsigned char) *cptr))
-	  gl_buffer_char(gl, tolower((int) *cptr), cptr - gl->line);
+	  *cptr = tolower((int) *cptr);
       };
       first = 0;
 /*
  * Write the possibly modified character back. Note that for non-modified
  * characters we want to do this as well, so as to advance the cursor.
  */
-      if(gl_print_char(gl, *cptr, cptr[1]))
+      if(gl_output_char(gl, *cptr, cptr[1]))
 	return 1;
     };
   };
@@ -4814,14 +3846,11 @@ static KT_KEY_FN(gl_redisplay)
  */
   int buff_curpos = gl->buff_curpos;
 /*
- * Do nothing if there is no line to be redisplayed.
+ * Move the cursor to the start of the terminal line, and clear from there
+ * to the end of the display.
  */
-  if(gl->endline)
-    return 0;
-/*
- * Erase the current input line.
- */
-  if(gl_erase_line(gl))
+  if(gl_set_term_curpos(gl, 0) ||
+     gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
     return 1;
 /*
  * Display the current prompt.
@@ -4831,17 +3860,13 @@ static KT_KEY_FN(gl_redisplay)
 /*
  * Render the part of the line that the user has typed in so far.
  */
-  if(gl_print_string(gl, gl->line, '\0'))
+  if(gl_output_string(gl, gl->line, '\0'))
     return 1;
 /*
  * Restore the cursor position.
  */
   if(gl_place_cursor(gl, buff_curpos))
     return 1;
-/*
- * Mark the redisplay operation as having been completed.
- */
-  gl->redisplay = 0;
 /*
  * Flush the redisplayed line to the terminal.
  */
@@ -4855,20 +3880,26 @@ static KT_KEY_FN(gl_redisplay)
 static KT_KEY_FN(gl_clear_screen)
 {
 /*
+ * Record the current cursor position.
+ */
+  int buff_curpos = gl->buff_curpos;
+/*
  * Home the cursor and clear from there to the end of the display.
  */
-  if(gl_print_control_sequence(gl, gl->nline, gl->home) ||
-     gl_print_control_sequence(gl, gl->nline, gl->clear_eod))
+  if(gl_output_control_sequence(gl, gl->nline, gl->home) ||
+     gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
     return 1;
 /*
- * The input line is no longer displayed.
+ * Redisplay the line.
  */
-  gl_line_erased(gl);
+  gl->term_curpos = 0;
+  gl->buff_curpos = 0;
+  if(gl_redisplay(gl,1))
+    return 1;
 /*
- * Arrange for the input line to be redisplayed.
+ * Restore the cursor position.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_place_cursor(gl, buff_curpos);
 }
 
 /*.......................................................................
@@ -4907,8 +3938,8 @@ static KT_KEY_FN(gl_transpose_chars)
 /*
  * Swap the two characters in the buffer.
  */
-  gl_buffer_char(gl, swap[0], gl->buff_curpos);
-  gl_buffer_char(gl, swap[1], gl->buff_curpos+1);
+  gl->line[gl->buff_curpos] = swap[0];
+  gl->line[gl->buff_curpos+1] = swap[1];
 /*
  * If the sum of the displayed width of the two characters
  * in their current and final positions is the same, swapping can
@@ -4918,8 +3949,8 @@ static KT_KEY_FN(gl_transpose_chars)
      gl_displayed_string_width(gl, swap, -1, gl->term_curpos)) {
     int insert = gl->insert;
     gl->insert = 0;
-    if(gl_print_char(gl, swap[0], swap[1]) ||
-       gl_print_char(gl, swap[1], gl->line[gl->buff_curpos+2]))
+    if(gl_output_char(gl, swap[0], swap[1]) ||
+       gl_output_char(gl, swap[1], gl->line[gl->buff_curpos+2]))
       return 1;
     gl->insert = insert;
 /*
@@ -4927,8 +3958,8 @@ static KT_KEY_FN(gl_transpose_chars)
  * redraw everything after the first of the characters.
  */
   } else {
-    if(gl_print_string(gl, gl->line + gl->buff_curpos, '\0') ||
-       gl_truncate_display(gl))
+    if(gl_output_string(gl, gl->line + gl->buff_curpos, '\0') ||
+       gl_output_control_sequence(gl, gl->nline, gl->clear_eod))
       return 1;
   };
 /*
@@ -4995,7 +4026,7 @@ static KT_KEY_FN(gl_kill_region)
 /*
  * If the mark is before the cursor, swap the cursor and the mark.
  */
-  if(gl->buff_mark < gl->buff_curpos && gl_exchange_point_and_mark(gl,1,NULL))
+  if(gl->buff_mark < gl->buff_curpos && gl_exchange_point_and_mark(gl,1))
     return 1;
 /*
  * Delete the characters.
@@ -5062,7 +4093,7 @@ static KT_KEY_FN(gl_yank)
  * Do nothing else if the cut buffer is empty.
  */
   if(gl->cutbuf[0] == '\0')
-    return gl_ring_bell(gl, 1, NULL);
+    return gl_ring_bell(gl, 1);
 /*
  * If in vi command mode, preserve the current line for potential
  * use by vi-undo.
@@ -5079,7 +4110,7 @@ static KT_KEY_FN(gl_yank)
  * gl_add_string_to_line() leaves the cursor after the last character that
  * was pasted, whereas vi leaves the cursor over the last character pasted.
  */
-  if(gl->editor == GL_VI_MODE && gl_cursor_left(gl, 1, NULL))
+  if(gl->editor == GL_VI_MODE && gl_cursor_left(gl, 1))
     return 1;
   return 0;
 }
@@ -5096,7 +4127,7 @@ static KT_KEY_FN(gl_append_yank)
  * If the cut buffer is empty, ring the terminal bell.
  */
   if(gl->cutbuf[0] == '\0')
-    return gl_ring_bell(gl, 1, NULL);
+    return gl_ring_bell(gl, 1);
 /*
  * Set the mark at the current location + 1.
  */
@@ -5109,7 +4140,7 @@ static KT_KEY_FN(gl_append_yank)
 /*
  * Arrange to paste the text in insert mode after the current character.
  */
-  if(gl_vi_append(gl, 0, NULL))
+  if(gl_vi_append(gl, 0))
     return 1;
 /*
  * Insert the string count times.
@@ -5126,104 +4157,73 @@ static KT_KEY_FN(gl_append_yank)
   return 0;
 }
 
+#ifdef USE_SIGWINCH
 /*.......................................................................
- * Attempt to ask the terminal for its current size. On systems that
- * don't support the TIOCWINSZ ioctl() for querying the terminal size,
- * the current values of gl->ncolumn and gl->nrow are returned.
+ * Respond to the receipt of a window change signal.
  *
  * Input:
- *  gl     GetLine *  The resource object of gl_get_line().
- * Input/Output:
- *  ncolumn    int *  The number of columns will be assigned to *ncolumn.
- *  nline      int *  The number of lines will be assigned to *nline.
+ *  gl     GetLine *  The resource object of this library.
+ *  redisplay  int    If true redisplay the current line after
+ *                    getting the new window size.
+ * Output:
+ *  return     int    0 - OK.
+ *                    1 - Error.
  */
-static void gl_query_size(GetLine *gl, int *ncolumn, int *nline)
+static int gl_resize_terminal(GetLine *gl, int redisplay)
 {
-#ifdef TIOCGWINSZ
+  int lines_used;       /* The number of lines currently in use */
+  struct winsize size;  /* The new size information */
+  int i;
+/*
+ * Record the fact that the sigwinch signal has been noted.
+ */
+  if(gl_pending_signal == SIGWINCH)
+    gl_pending_signal = -1;
 /*
  * Query the new terminal window size. Ignore invalid responses.
  */
-  struct winsize size;
   if(ioctl(gl->output_fd, TIOCGWINSZ, &size) == 0 &&
      size.ws_row > 0 && size.ws_col > 0) {
-    *ncolumn = size.ws_col;
-    *nline = size.ws_row;
-    return;
-  };
-#endif
 /*
- * Return the existing values.
+ * Redisplay the input line?
  */
-  *ncolumn = gl->ncolumn;
-  *nline = gl->nline;
-  return;
-}
-
-/*.......................................................................
- * Query the size of the terminal, and if it has changed, redraw the
- * current input line accordingly.
- *
- * Input:
- *  gl     GetLine *  The resource object of gl_get_line().
- * Output:
- *  return     int    0 - OK.
- *                    1 - Error.
- */
-static int _gl_update_size(GetLine *gl)
-{
-  int ncolumn, nline;    /* The new size of the terminal */
+    if(redisplay) {
 /*
- * Query the new terminal window size.
+ * How many lines are currently displayed.
  */
-  gl_query_size(gl, &ncolumn, &nline);
+      lines_used = (gl_displayed_string_width(gl,gl->line,-1,gl->prompt_len) +
+		    gl->prompt_len + gl->ncolumn - 1) / gl->ncolumn;
 /*
- * Update gl and the displayed line to fit the new dimensions.
+ * Move to the cursor to the start of the line.
  */
-  return gl_handle_tty_resize(gl, ncolumn, nline);
-}
-
-/*.......................................................................
- * Redraw the current input line to account for a change in the terminal
- * size. Also install the new size in gl.
- *
- * Input:
- *  gl     GetLine *  The resource object of gl_get_line().
- *  ncolumn    int    The new number of columns.
- *  nline      int    The new number of lines.
- * Output:
- *  return     int    0 - OK.
- *                    1 - Error.
- */
-static int gl_handle_tty_resize(GetLine *gl, int ncolumn, int nline)
-{
+      for(i=1; i<lines_used; i++) {
+	if(gl_output_control_sequence(gl, 1, gl->up))
+	  return 1;
+      };
+      if(gl_output_control_sequence(gl, 1, gl->bol))
+	return 1;
 /*
- * If the input device isn't a terminal, just record the new size.
+ * Clear to the end of the terminal.
  */
-  if(!gl->is_term) {
-    gl->nline = nline;
-    gl->ncolumn = ncolumn;
+      if(gl_output_control_sequence(gl, size.ws_row, gl->clear_eod))
+	return 1;
 /*
- * Has the size actually changed?
+ * Record the fact that the cursor is now at the beginning of the line.
  */
-  } else if(ncolumn != gl->ncolumn || nline != gl->nline) {
-/*
- * If we are currently editing a line, erase it.
- */
-    if(gl_erase_line(gl))
-      return 1;
+      gl->term_curpos = 0;
+    };
 /*
  * Update the recorded window size.
  */
-    gl->nline = nline;
-    gl->ncolumn = ncolumn;
-/*
- * Arrange for the input line to be redrawn before the next character
- * is read from the terminal.
- */
-    gl_queue_redisplay(gl);
+    gl->nline = size.ws_row;
+    gl->ncolumn = size.ws_col;
   };
-  return 0;
+/*
+ * Redisplay the line?
+ */
+  return redisplay ? gl_redisplay(gl,1) : 0;
 }
+#endif
 
 /*.......................................................................
  * This is the action function that recalls the previous line in the
@@ -5241,38 +4241,31 @@ static KT_KEY_FN(gl_up_history)
  */
   gl->preload_id = 0;
 /*
- * Record the key sequence number of this search action.
- */
-  gl->last_search = gl->keyseq_count;
-/*
  * We don't want a search prefix for this function.
  */
-  if(_glh_search_prefix(gl->glh, gl->line, 0)) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
+  if(_glh_search_prefix(gl->glh, gl->line, 0))
     return 1;
-  };
 /*
  * Recall the count'th next older line in the history list. If the first one
- * fails we can return since nothing has changed, otherwise we must continue
+ * fails we can return since nothing has changed otherwise we must continue
  * and update the line state.
  */
-  if(_glh_find_backwards(gl->glh, gl->line, gl->linelen+1) == NULL)
+  if(_glh_find_backwards(gl->glh, gl->line, gl->linelen) == NULL)
     return 0;
-  while(--count && _glh_find_backwards(gl->glh, gl->line, gl->linelen+1))
+  while(--count && _glh_find_backwards(gl->glh, gl->line, gl->linelen))
     ;
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange to have the cursor placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -5287,47 +4280,40 @@ static KT_KEY_FN(gl_down_history)
  */
   gl_vi_command_mode(gl);
 /*
- * Record the key sequence number of this search action.
- */
-  gl->last_search = gl->keyseq_count;
-/*
  * If no search is currently in progress continue a previous recall
  * session from a previous entered line if possible.
  */
   if(_glh_line_id(gl->glh, 0) == 0 && gl->preload_id) {
-    _glh_recall_line(gl->glh, gl->preload_id, gl->line, gl->linelen+1);
+    _glh_recall_line(gl->glh, gl->preload_id, gl->line, gl->linelen);
     gl->preload_id = 0;
   } else {
 /*
  * We don't want a search prefix for this function.
  */
-    if(_glh_search_prefix(gl->glh, gl->line, 0)) {
-      _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
+    if(_glh_search_prefix(gl->glh, gl->line, 0))
       return 1;
-    };
 /*
  * Recall the count'th next newer line in the history list. If the first one
  * fails we can return since nothing has changed otherwise we must continue
  * and update the line state.
  */
-    if(_glh_find_forwards(gl->glh, gl->line, gl->linelen+1) == NULL)
+    if(_glh_find_forwards(gl->glh, gl->line, gl->linelen) == NULL)
       return 0;
-    while(--count && _glh_find_forwards(gl->glh, gl->line, gl->linelen+1))
+    while(--count && _glh_find_forwards(gl->glh, gl->line, gl->linelen))
       ;
   };
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange to have the cursor placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -5348,41 +4334,41 @@ static KT_KEY_FN(gl_history_search_backward)
  */
   gl->preload_id = 0;
 /*
- * Record the key sequence number of this search action.
+ * If the previous thing that the user did wasn't to execute a history
+ * search function, set the search prefix equal to the string that
+ * precedes the cursor. In vi command mode include the character that
+ * is under the cursor in the string. If count<0 force a repeat search
+ * even if the last command wasn't a history command.
+ */
+  if(gl->last_search != gl->keyseq_count - 1 && count>=0 &&
+     _glh_search_prefix(gl->glh, gl->line, gl->buff_curpos +
+			(gl->editor==GL_VI_MODE && gl->ntotal>0)))
+    return 1;
+/*
+ * Record the key sequence number in which this search function is
+ * being executed, so that the next call to this function or
+ * gl_history_search_forward() knows if any other operations
+ * were performed in between.
  */
   gl->last_search = gl->keyseq_count;
-/*
- * If a prefix search isn't already in progress, replace the search
- * prefix to the string that precedes the cursor. In vi command mode
- * include the character that is under the cursor in the string.  If
- * count<0 keep the previous search prefix regardless, so as to force
- * a repeat search even if the last command wasn't a history command.
- */
-  if(count >= 0 && !_glh_search_active(gl->glh) &&
-     _glh_search_prefix(gl->glh, gl->line, gl->buff_curpos +
-			(gl->editor==GL_VI_MODE && gl->ntotal>0))) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-    return 1;
-  };
 /*
  * Search backwards for a match to the part of the line which precedes the
  * cursor.
  */
-  if(_glh_find_backwards(gl->glh, gl->line, gl->linelen+1) == NULL)
+  if(_glh_find_backwards(gl->glh, gl->line, gl->linelen) == NULL)
     return 0;
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange to have the cursor placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -5392,7 +4378,7 @@ static KT_KEY_FN(gl_history_search_backward)
  */
 static KT_KEY_FN(gl_history_re_search_backward)
 {
-  return gl_history_search_backward(gl, -1, NULL);
+  return gl_history_search_backward(gl, -1);
 }
 
 /*.......................................................................
@@ -5410,40 +4396,40 @@ static KT_KEY_FN(gl_history_search_forward)
  */
   gl_vi_command_mode(gl);
 /*
- * Record the key sequence number of this search action.
+ * If the previous thing that the user did wasn't to execute a history
+ * search function, set the search prefix equal to the string that
+ * precedes the cursor. In vi command mode include the character that
+ * is under the cursor in the string. If count<0 force a repeat search
+ * even if the last command wasn't a history command.
+ */
+  if(gl->last_search != gl->keyseq_count - 1 && count>=0 &&
+     _glh_search_prefix(gl->glh, gl->line, gl->buff_curpos +
+			(gl->editor==GL_VI_MODE && gl->ntotal>0)))
+    return 1;
+/*
+ * Record the key sequence number in which this search function is
+ * being executed, so that the next call to this function or
+ * gl_history_search_backward() knows if any other operations
+ * were performed in between.
  */
   gl->last_search = gl->keyseq_count;
 /*
- * If a prefix search isn't already in progress, replace the search
- * prefix to the string that precedes the cursor. In vi command mode
- * include the character that is under the cursor in the string.  If
- * count<0 keep the previous search prefix regardless, so as to force
- * a repeat search even if the last command wasn't a history command.
- */
-  if(count >= 0 && !_glh_search_active(gl->glh) &&
-     _glh_search_prefix(gl->glh, gl->line, gl->buff_curpos +
-			(gl->editor==GL_VI_MODE && gl->ntotal>0))) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-    return 1;
-  };
-/*
  * Search forwards for the next matching line.
  */
-  if(_glh_find_forwards(gl->glh, gl->line, gl->linelen+1) == NULL)
+  if(_glh_find_forwards(gl->glh, gl->line, gl->linelen) == NULL)
     return 0;
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange for the cursor to be placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -5453,46 +4439,29 @@ static KT_KEY_FN(gl_history_search_forward)
  */
 static KT_KEY_FN(gl_history_re_search_forward)
 {
-  return gl_history_search_forward(gl, -1, NULL);
+  return gl_history_search_forward(gl, -1);
 }
-
-#ifdef HIDE_FILE_SYSTEM
-/*.......................................................................
- * The following function is used as the default completion handler when
- * the filesystem is to be hidden. It simply reports no completions.
- */
-static CPL_MATCH_FN(gl_no_completions)
-{
-  return 0;
-}
-#endif
 
 /*.......................................................................
  * This is the tab completion function that completes the filename that
- * precedes the cursor position. Its callback data argument must be a
- * pointer to a GlCplCallback containing the completion callback function
- * and its callback data, or NULL to use the builtin filename completer.
+ * precedes the cursor position.
  */
 static KT_KEY_FN(gl_complete_word)
 {
   CplMatches *matches;    /* The possible completions */
+  int redisplay=0;        /* True if the whole line needs to be redrawn */
   int suffix_len;         /* The length of the completion extension */
   int cont_len;           /* The length of any continuation suffix */
   int nextra;             /* The number of characters being added to the */
                           /*  total length of the line. */
   int buff_pos;           /* The buffer index at which the completion is */
                           /*  to be inserted. */
-  int waserr = 0;         /* True after errors */
 /*
- * Get the container of the completion callback and its callback data.
- */
-  GlCplCallback *cb = data ? (GlCplCallback *) data : &gl->cplfn;
-/*
- * In vi command mode, switch to append mode so that the character under
- * the cursor is included in the completion (otherwise people can't
+ * In vi command mode, switch to append mode so that the character below
+ * the character is included in the completion (otherwise people can't
  * complete at the end of the line).
  */
-  if(gl->vi.command && gl_vi_append(gl, 0, NULL))
+  if(gl->vi.command && gl_vi_append(gl, 0))
     return 1;
 /*
  * Get the cursor position at which the completion is to be inserted.
@@ -5501,13 +4470,14 @@ static KT_KEY_FN(gl_complete_word)
 /*
  * Perform the completion.
  */
-  matches = cpl_complete_word(gl->cpl, gl->line, gl->buff_curpos, cb->data,
-			      cb->fn);
-/*
- * No matching completions?
- */
+  matches = cpl_complete_word(gl->cpl, gl->line, gl->buff_curpos, gl->cpl_data,
+			      gl->cpl_fn);
   if(!matches) {
-    waserr = gl_print_info(gl, cpl_last_error(gl->cpl), GL_END_INFO);
+    if(gl->echo &&
+       fprintf(gl->output_fp, "\r\n%s\n", cpl_last_error(gl->cpl)) < 0)
+      return 1;
+    gl->term_curpos = 0;
+    redisplay = 1;
 /*
  * Are there any completions?
  */
@@ -5516,10 +4486,17 @@ static KT_KEY_FN(gl_complete_word)
  * If there any ambiguous matches, report them, starting on a new line.
  */
     if(matches->nmatch > 1 && gl->echo) {
-      if(_gl_normal_io(gl) ||
-	 _cpl_output_completions(matches, gl_write_fn, gl, gl->ncolumn))
-	waserr = 1;
+      if(fprintf(gl->output_fp, "\r\n") < 0)
+	return 1;
+      cpl_list_completions(matches, gl->output_fp, gl->ncolumn);
+      redisplay = 1;
     };
+/*
+ * If the callback called gl_change_prompt(), we will need to redisplay
+ * the whole line.
+ */
+    if(gl->prompt_changed)
+      redisplay = 1;
 /*
  * Get the length of the suffix and any continuation suffix to add to it.
  */
@@ -5533,8 +4510,8 @@ static KT_KEY_FN(gl_complete_word)
     if(matches->nmatch==1 && cont_len > 0 &&
        matches->cont_suffix[cont_len - 1] == '\n') {
       cont_len--;
-      if(gl_newline(gl, 1, NULL))
-	waserr = 1;
+      if(gl_newline(gl, 1))
+	return 1;
     };
 /*
  * Work out the number of characters that are to be added.
@@ -5543,7 +4520,7 @@ static KT_KEY_FN(gl_complete_word)
 /*
  * Is there anything to be added?
  */
-    if(!waserr && nextra) {
+    if(nextra) {
 /*
  * Will there be space for the expansion in the line buffer?
  */
@@ -5551,50 +4528,58 @@ static KT_KEY_FN(gl_complete_word)
 /*
  * Make room to insert the filename extension.
  */
-	gl_make_gap_in_buffer(gl, gl->buff_curpos, nextra);
+	memmove(gl->line + gl->buff_curpos + nextra, gl->line + gl->buff_curpos,
+		gl->ntotal - gl->buff_curpos);
 /*
  * Insert the filename extension.
  */
-	gl_buffer_string(gl, matches->suffix, suffix_len, gl->buff_curpos);
+	memcpy(gl->line + gl->buff_curpos, matches->suffix, suffix_len);
 /*
  * Add the terminating characters.
  */
-	gl_buffer_string(gl, matches->cont_suffix, cont_len,
-			 gl->buff_curpos + suffix_len);
+	memcpy(gl->line + gl->buff_curpos + suffix_len, matches->cont_suffix,
+	       cont_len);
+/*
+ * Record the increased length of the line.
+ */
+	gl->ntotal += nextra;
 /*
  * Place the cursor position at the end of the completion.
  */
 	gl->buff_curpos += nextra;
 /*
+ * Terminate the extended line.
+ */
+	gl->line[gl->ntotal] = '\0';
+/*
  * If we don't have to redisplay the whole line, redisplay the part
  * of the line which follows the original cursor position, and place
  * the cursor at the end of the completion.
  */
-	if(gl->displayed) {
-	  if(gl_truncate_display(gl) ||
-	     gl_print_string(gl, gl->line + buff_pos, '\0') ||
+	if(!redisplay) {
+	  if(gl_output_control_sequence(gl, gl->nline, gl->clear_eod) ||
+	     gl_output_string(gl, gl->line + buff_pos, '\0') ||
 	     gl_place_cursor(gl, gl->buff_curpos))
-	    waserr = 1;
+	    return 1;
 	};
       } else {
-	(void) gl_print_info(gl,
-			     "Insufficient room in line for file completion.",
-			     GL_END_INFO);
-	waserr = 1;
+	fprintf(stderr,
+		"\r\nInsufficient room in line for file completion.\r\n");
+	redisplay = 1;
       };
     };
   };
 /*
- * If any output had to be written to the terminal, then editing will
- * have been suspended, make sure that we are back in raw line editing
- * mode before returning.
+ * Redisplay the whole line?
  */
-  if(_gl_raw_io(gl, 1))
-    waserr = 1;
+  if(redisplay) {
+    gl->term_curpos = 0;
+    if(gl_redisplay(gl,1))
+      return 1;
+  };
   return 0;
 }
 
-#ifndef HIDE_FILE_SYSTEM
 /*.......................................................................
  * This is the function that expands the filename that precedes the
  * cursor position. It expands ~user/ expressions, $envvar expressions,
@@ -5606,21 +4591,23 @@ static KT_KEY_FN(gl_expand_filename)
                          /*  gl->line[]. */
   FileExpansion *result; /* The results of the filename expansion */
   int pathlen;           /* The length of the pathname being expanded */
+  int redisplay=0;       /* True if the whole line needs to be redrawn */
   int length;            /* The number of characters needed to display the */
                          /*  expanded files. */
   int nextra;            /* The number of characters to be added */
   int i,j;
 /*
- * In vi command mode, switch to append mode so that the character under
- * the cursor is included in the completion (otherwise people can't
+ * In vi command mode, switch to append mode so that the character below
+ * the character is included in the completion (otherwise people can't
  * complete at the end of the line).
  */
-  if(gl->vi.command && gl_vi_append(gl, 0, NULL))
+  if(gl->vi.command && gl_vi_append(gl, 0))
     return 1;
 /*
  * Locate the start of the filename that precedes the cursor position.
  */
-  start_path = _pu_start_of_path(gl->line, gl->buff_curpos);
+  start_path = _pu_start_of_path(gl->line,
+				 gl->buff_curpos > 0 ? gl->buff_curpos : 0);
   if(!start_path)
     return 1;
 /*
@@ -5632,15 +4619,25 @@ static KT_KEY_FN(gl_expand_filename)
  */
   result = ef_expand_file(gl->ef, start_path, pathlen);
 /*
- * If there was an error, report the error on a new line.
+ * If there was an error, report the error on a new line, then redraw
+ * the original line.
  */
-  if(!result)
-    return gl_print_info(gl, ef_last_error(gl->ef), GL_END_INFO);
+  if(!result) {
+    if(gl->echo &&
+       fprintf(gl->output_fp, "\r\n%s\n", ef_last_error(gl->ef)) < 0)
+      return 1;
+    gl->term_curpos = 0;
+    return gl_redisplay(gl,1);
+  };
 /*
  * If no files matched, report this as well.
  */
-  if(result->nfile == 0 || !result->exists)
-    return gl_print_info(gl, "No files match.", GL_END_INFO);
+  if(result->nfile == 0 || !result->exists) {
+    if(gl->echo && fprintf(gl->output_fp, "\r\nNo files match.\n") < 0)
+      return 1;
+    gl->term_curpos = 0;
+    return gl_redisplay(gl,1);
+  };
 /*
  * If in vi command mode, preserve the current line for potential use by
  * vi-undo.
@@ -5673,18 +4670,16 @@ static KT_KEY_FN(gl_expand_filename)
  * Will there be space for the expansion in the line buffer?
  */
   if(gl->ntotal + nextra >= gl->linelen) {
-    return gl_print_info(gl, "Insufficient room in line for file expansion.",
-			 GL_END_INFO);
+    fprintf(stderr, "\r\nInsufficient room in line for file expansion.\r\n");
+    redisplay = 1;
   } else {
 /*
  * Do we need to move the part of the line that followed the unexpanded
  * filename?
  */
-    if(nextra > 0) {
-      gl_make_gap_in_buffer(gl, gl->buff_curpos, nextra);
-    } else if(nextra < 0) {
-      gl->buff_curpos += nextra;
-      gl_remove_from_buffer(gl, gl->buff_curpos, -nextra);
+    if(nextra != 0) {
+      memmove(gl->line + gl->buff_curpos + nextra, gl->line + gl->buff_curpos,
+	      gl->ntotal - gl->buff_curpos);
     };
 /*
  * Insert the filenames, separated by spaces, and with internal spaces,
@@ -5696,29 +4691,46 @@ static KT_KEY_FN(gl_expand_filename)
 	int c = *file++;
 	switch(c) {
 	case ' ': case '\t': case '\\': case '*': case '?': case '[':
-	  gl_buffer_char(gl, '\\', j++);
+	  gl->line[j++] = '\\';
 	};
-	gl_buffer_char(gl, c, j++);
+	gl->line[j++] = c;
       };
-      gl_buffer_char(gl, ' ', j++);
+      gl->line[j++] = ' ';
     };
+/*
+ * Record the increased length of the line.
+ */
+    gl->ntotal += nextra;
+/*
+ * Place the cursor position at the end of the expansion.
+ */
+    gl->buff_curpos += nextra;
+/*
+ * Terminate the extended line.
+ */
+    gl->line[gl->ntotal] = '\0';
   };
 /*
- * Redisplay the part of the line which follows the start of
+ * Display the whole line on a new line?
+ */
+  if(redisplay) {
+    gl->term_curpos = 0;
+    return gl_redisplay(gl,1);
+  };
+/*
+ * Otherwise redisplay the part of the line which follows the start of
  * the original filename.
  */
-  if(gl_place_cursor(gl, start_path - gl->line) ||
-     gl_truncate_display(gl) ||
-     gl_print_string(gl, start_path, start_path[length]))
+  if(gl_set_term_curpos(gl, gl_buff_curpos_to_term_curpos(gl, start_path - gl->line)) ||
+     gl_output_control_sequence(gl, gl->nline, gl->clear_eod) ||
+     gl_output_string(gl, start_path, gl->line[gl->buff_curpos]))
     return 1;
 /*
- * Move the cursor to the end of the expansion.
+ * Restore the cursor position to the end of the expansion.
  */
-  return gl_place_cursor(gl, (start_path - gl->line) + length);
+  return gl_place_cursor(gl, gl->buff_curpos);
 }
-#endif
 
-#ifndef HIDE_FILE_SYSTEM
 /*.......................................................................
  * This is the action function that lists glob expansions of the
  * filename that precedes the cursor position. It expands ~user/
@@ -5733,7 +4745,8 @@ static KT_KEY_FN(gl_list_glob)
 /*
  * Locate the start of the filename that precedes the cursor position.
  */
-  start_path = _pu_start_of_path(gl->line, gl->buff_curpos);
+  start_path = _pu_start_of_path(gl->line,
+				 gl->buff_curpos > 0 ? gl->buff_curpos : 0);
   if(!start_path)
     return 1;
 /*
@@ -5745,27 +4758,32 @@ static KT_KEY_FN(gl_list_glob)
  */
   result = ef_expand_file(gl->ef, start_path, pathlen);
 /*
- * If there was an error, report it.
+ * If there was an error, report the error.
  */
   if(!result) {
-    return gl_print_info(gl,  ef_last_error(gl->ef), GL_END_INFO);
+    if(gl->echo &&
+       fprintf(gl->output_fp, "\r\n%s\n", ef_last_error(gl->ef)) < 0)
+      return 1;
 /*
  * If no files matched, report this as well.
  */
   } else if(result->nfile == 0 || !result->exists) {
-    return gl_print_info(gl, "No files match.", GL_END_INFO);
+    if(gl->echo && fprintf(gl->output_fp, "\r\nNo files match.\n") < 0)
+      return 1;
 /*
  * List the matching expansions.
  */
   } else if(gl->echo) {
-    if(gl_start_newline(gl, 1) ||
-       _ef_output_expansions(result, gl_write_fn, gl, gl->ncolumn))
+    if(fprintf(gl->output_fp, "\r\n") < 0)
       return 1;
-    gl_queue_redisplay(gl);
+    ef_list_expansions(result, gl->output_fp, gl->ncolumn);
   };
-  return 0;
+/*
+ * Redisplay the line being edited.
+ */
+  gl->term_curpos = 0;
+  return gl_redisplay(gl,1);
 }
-#endif
 
 /*.......................................................................
  * Return non-zero if a character should be considered a part of a word.
@@ -5800,29 +4818,18 @@ static int gl_is_word_char(int c)
  */
 int gl_customize_completion(GetLine *gl, void *data, CplMatchFn *match_fn)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
 /*
  * Check the arguments.
  */
   if(!gl || !match_fn) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "gl_customize_completion: NULL argument(s).\n");
     return 1;
   };
 /*
- * Temporarily block all signals.
- */
-  gl_mask_signals(gl, &oldset);
-/*
  * Record the new completion function and its callback data.
  */
-  gl->cplfn.fn = match_fn;
-  gl->cplfn.data = data;
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
+  gl->cpl_fn = match_fn;
+  gl->cpl_data = data;
   return 0;
 }
 
@@ -5845,66 +4852,23 @@ int gl_customize_completion(GetLine *gl, void *data, CplMatchFn *match_fn)
 int gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
 		       const char *term)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_change_terminal() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_change_terminal(gl, input_fp, output_fp, term);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_change_terminal() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
-			       const char *term)
-{
   int is_term = 0;   /* True if both input_fd and output_fd are associated */
                      /*  with a terminal. */
 /*
  * Require that input_fp and output_fp both be valid.
  */
   if(!input_fp || !output_fp) {
-    gl_print_info(gl, "Can't change terminal. Bad input/output stream(s).",
-		  GL_END_INFO);
+    fprintf(stderr, "\r\ngl_change_terminal: Bad input/output stream(s).\n");
     return 1;
   };
 /*
- * Are we displacing an existing terminal (as opposed to setting the
- * initial terminal)?
- */
-  if(gl->input_fd >= 0) {
-/*
- * Make sure to leave the previous terminal in a usable state.
- */
-    if(_gl_normal_io(gl))
-      return 1;
-/*
- * Remove the displaced terminal from the list of fds to watch.
+ * If we are displacing a previous terminal, remove it from the list
+ * of fds being watched.
  */
 #ifdef HAVE_SELECT
+  if(gl->input_fd >= 0)
     FD_CLR(gl->input_fd, &gl->rfds);
 #endif
-  };
 /*
  * Record the file descriptors and streams.
  */
@@ -5913,10 +4877,11 @@ static int _gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
   gl->output_fp = output_fp;
   gl->output_fd = fileno(output_fp);
 /*
- * If needed, expand the record of the maximum file-descriptor that might
- * need to be monitored with select().
+ * Make sure that the file descriptor will be visible in the set to
+ * be watched.
  */
 #ifdef HAVE_SELECT
+  FD_SET(gl->input_fd, &gl->rfds);
   if(gl->input_fd > gl->max_fd)
     gl->max_fd = gl->input_fd;
 #endif
@@ -5928,12 +4893,9 @@ static int _gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
 /*
  * For terminal editing, we need both output_fd and input_fd to refer to
  * a terminal. While we can't verify that they both point to the same
- * terminal, we can verify that they point to terminals. If the user
- * sets the TERM environment variable to "dumb", treat a terminal as
- * a non-interactive I/O stream.
+ * terminal, we can verify that they point to terminals.
  */
-  is_term = (isatty(gl->input_fd) && isatty(gl->output_fd)) &&
-    !(term && strcmp(term, "dumb")==0);
+  is_term = isatty(gl->input_fd) && isatty(gl->output_fd);
 /*
  * If we are interacting with a terminal and no terminal type has been
  * specified, treat it as a generic ANSI terminal.
@@ -5973,36 +4935,29 @@ static int _gl_change_terminal(GetLine *gl, FILE *input_fp, FILE *output_fp,
  * Get the current settings of the terminal.
  */
     if(tcgetattr(gl->input_fd, &gl->oldattr)) {
-      _err_record_msg(gl->err, "tcgetattr error", END_ERR_MSG);
+      fprintf(stderr, "\r\ngl_change_terminal: tcgetattr error: %s\n",
+	      strerror(errno));
       return 1;
     };
-/*
- * If we don't set this now, gl_control_strings() won't know
- * that it is talking to a terminal.
- */
-    gl->is_term = 1;
 /*
  * Lookup the terminal control string and size information.
  */
-    if(gl_control_strings(gl, term)) {
-      gl->is_term = 0;
+    if(gl_control_strings(gl, term))
       return 1;
-    };
+/*
+ * We now have enough info to interact with the terminal.
+ */
+    gl->is_term = 1;
+/*
+ * Find out the current terminal size.
+ */
+  (void) gl_terminal_size(gl, GL_DEF_NCOLUMN, GL_DEF_NLINE);
 /*
  * Bind terminal-specific keys.
  */
     if(gl_bind_terminal_keys(gl))
       return 1;
   };
-/*
- * Assume that the caller has given us a terminal in a sane state.
- */
-  gl->io_mode = GL_NORMAL_MODE;
-/*
- * Switch into the currently configured I/O mode.
- */
-  if(_gl_io_mode(gl, gl->io_mode))
-    return 1;
   return 0;
 }
 
@@ -6047,10 +5002,8 @@ static int gl_bind_terminal_keys(GetLine *gl)
 			  "literal-next"))
     return 1;
 #else
-  if(_kt_set_keybinding(gl->bindings, KTB_TERM, "^V", "literal-next")) {
-    _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
+  if(_kt_set_keybinding(gl->bindings, KTB_TERM, "^V", "literal-next"))
     return 1;
-  };
 #endif
 /*
  * Bind action functions to the terminal-specific arrow keys
@@ -6074,13 +5027,33 @@ static KT_KEY_FN(gl_del_char_or_list_or_eof)
  * If we have an empty line arrange to return EOF.
  */
   if(gl->ntotal < 1) {
-    gl_record_status(gl, GLR_EOF, 0);
     return 1;
 /*
  * If we are at the end of the line list possible completions.
  */
   } else if(gl->buff_curpos >= gl->ntotal) {
-    return gl_list_completions(gl, 1, NULL);
+/*
+ * Get the list of possible completions.
+ */
+    CplMatches *matches = cpl_complete_word(gl->cpl, gl->line, gl->buff_curpos,
+					    gl->cpl_data, gl->cpl_fn);
+    if(!matches) {
+      if(gl->echo &&
+	 fprintf(gl->output_fp, "\r\n%s\n", cpl_last_error(gl->cpl)) < 0)
+	return 1;
+      gl->term_curpos = 0;
+/*
+ * List the matches.
+ */
+    } else if(matches->nmatch > 0 && gl->echo) {
+      if(fprintf(gl->output_fp, "\r\n") < 0)
+	return 1;
+      cpl_list_completions(matches, gl->output_fp, gl->ncolumn);
+    };
+/*
+ * Redisplay the line unchanged.
+ */
+    return gl_redisplay(gl,1);
 /*
  * Within the line delete the character that follows the cursor.
  */
@@ -6093,7 +5066,7 @@ static KT_KEY_FN(gl_del_char_or_list_or_eof)
 /*
  * Delete 'count' characters.
  */
-    return gl_forward_delete_char(gl, count, NULL);
+    return gl_forward_delete_char(gl, count);
   };
 }
 
@@ -6109,55 +5082,34 @@ static KT_KEY_FN(gl_list_or_eof)
  * If we have an empty line arrange to return EOF.
  */
   if(gl->ntotal < 1) {
-    gl_record_status(gl, GLR_EOF, 0);
     return 1;
 /*
  * Otherwise list possible completions.
  */
   } else {
-    return gl_list_completions(gl, 1, NULL);
-  };
-}
-
-/*.......................................................................
- * List possible completions of the word that precedes the cursor. The
- * callback data argument must either be NULL to select the default
- * file completion callback, or be a GlCplCallback object containing the
- * completion callback function to call.
- */
-static KT_KEY_FN(gl_list_completions)
-{
-  int waserr = 0;   /* True after errors */
-/*
- * Get the container of the completion callback and its callback data.
- */
-  GlCplCallback *cb = data ? (GlCplCallback *) data : &gl->cplfn;
 /*
  * Get the list of possible completions.
  */
-  CplMatches *matches = cpl_complete_word(gl->cpl, gl->line, gl->buff_curpos,
-					  cb->data, cb->fn);
-/*
- * No matching completions?
- */
-  if(!matches) {
-    waserr = gl_print_info(gl, cpl_last_error(gl->cpl), GL_END_INFO);
+    CplMatches *matches = cpl_complete_word(gl->cpl, gl->line, gl->buff_curpos,
+					    gl->cpl_data, gl->cpl_fn);
+    if(!matches) {
+      if(gl->echo &&
+	 fprintf(gl->output_fp, "\r\n%s\n", cpl_last_error(gl->cpl)) < 0)
+	return 1;
+      gl->term_curpos = 0;
 /*
  * List the matches.
  */
-  } else if(matches->nmatch > 0 && gl->echo) {
-    if(_gl_normal_io(gl) ||
-       _cpl_output_completions(matches, gl_write_fn, gl, gl->ncolumn))
-      waserr = 1;
-  };
+    } else if(matches->nmatch > 0 && gl->echo) {
+      if(fprintf(gl->output_fp, "\r\n") < 0)
+	return 1;
+      cpl_list_completions(matches, gl->output_fp, gl->ncolumn);
+    };
 /*
- * If any output had to be written to the terminal, then editing will
- * have been suspended, make sure that we are back in raw line editing
- * mode before returning.
+ * Redisplay the line unchanged.
  */
-  if(_gl_raw_io(gl, 1))
-    waserr = 1;
-  return waserr;
+    return gl_redisplay(gl,1);
+  };
 }
 
 /*.......................................................................
@@ -6176,10 +5128,10 @@ static int _gl_bind_arrow_keys(GetLine *gl)
 /*
  * Process each of the arrow keys.
  */
-  if(_gl_rebind_arrow_key(gl, "up", gl->u_arrow, "^[[A", "^[OA") ||
-     _gl_rebind_arrow_key(gl, "down", gl->d_arrow, "^[[B", "^[OB") ||
-     _gl_rebind_arrow_key(gl, "left", gl->l_arrow, "^[[D", "^[OD") ||
-     _gl_rebind_arrow_key(gl, "right", gl->r_arrow, "^[[C", "^[OC"))
+  if(_gl_rebind_arrow_key(gl->bindings, "up", gl->u_arrow, "^[[A", "^[OA") ||
+     _gl_rebind_arrow_key(gl->bindings, "down", gl->d_arrow, "^[[B", "^[OB") ||
+     _gl_rebind_arrow_key(gl->bindings, "left", gl->l_arrow, "^[[D", "^[OD") ||
+     _gl_rebind_arrow_key(gl->bindings, "right", gl->r_arrow, "^[[C", "^[OC"))
     return 1;
   return 0;
 }
@@ -6195,7 +5147,7 @@ static int _gl_bind_arrow_keys(GetLine *gl)
  * of default key sequences.
  *
  * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
+ *  bindings     KeyTab *   The table of key bindings.
  *  name           char *   The symbolic name of the arrow key.
  *  term_seq       char *   The terminal-specific arrow-key sequence.
  *  def_seq1       char *   The first default arrow-key sequence.
@@ -6204,36 +5156,28 @@ static int _gl_bind_arrow_keys(GetLine *gl)
  *  return          int     0 - OK.
  *                          1 - Error.
  */
-static int _gl_rebind_arrow_key(GetLine *gl, const char *name,
+static int _gl_rebind_arrow_key(KeyTab *bindings, const char *name,
 				const char *term_seq, const char *def_seq1,
 				const char *def_seq2)
 {
-  KeySym *keysym;  /* The binding-table entry matching the arrow-key name */
-  int nsym;        /* The number of ambiguous matches */
+  int first,last;  /* The indexes of the first and last matching entries */
 /*
  * Lookup the key binding for the symbolic name of the arrow key. This
  * will either be the default action, or a user provided one.
  */
-  if(_kt_lookup_keybinding(gl->bindings, name, strlen(name), &keysym, &nsym)
+  if(_kt_lookup_keybinding(bindings, name, strlen(name), &first, &last)
      == KT_EXACT_MATCH) {
 /*
  * Get the action function.
  */
-    KtAction *action = keysym->actions + keysym->binder;
-    KtKeyFn *fn = action->fn;
-    void *data = action->data;
+    KtKeyFn *key_fn = bindings->table[first].keyfn;
 /*
  * Bind this to each of the specified key sequences.
  */
-    if((term_seq &&
-	_kt_set_keyfn(gl->bindings, KTB_TERM, term_seq, fn, data)) ||
-       (def_seq1 &&
-	_kt_set_keyfn(gl->bindings, KTB_NORM, def_seq1, fn, data)) ||
-       (def_seq2 &&
-	_kt_set_keyfn(gl->bindings, KTB_NORM, def_seq2, fn, data))) {
-      _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
+    if((term_seq && _kt_set_keyfn(bindings, KTB_TERM, term_seq, key_fn)) ||
+       (def_seq1 && _kt_set_keyfn(bindings, KTB_NORM, def_seq1, key_fn)) ||
+       (def_seq2 && _kt_set_keyfn(bindings, KTB_NORM, def_seq2, key_fn)))
       return 1;
-    };
   };
   return 0;
 }
@@ -6255,17 +5199,6 @@ static int _gl_rebind_arrow_key(GetLine *gl, const char *name,
  */
 static int _gl_read_config_file(GetLine *gl, const char *filename, KtBinder who)
 {
-/*
- * If filesystem access is to be excluded, configuration files can't
- * be read.
- */
-#ifdef WITHOUT_FILE_SYSTEM
-  _err_record_msg(gl->err,
-		  "Can't read configuration files without filesystem access",
-		  END_ERR_MSG);
-  errno = EINVAL;
-  return 1;
-#else
   FileExpansion *expansion; /* The expansion of the filename */
   FILE *fp;                 /* The opened file */
   int waserr = 0;           /* True if an error occurred while reading */
@@ -6274,9 +5207,7 @@ static int _gl_read_config_file(GetLine *gl, const char *filename, KtBinder who)
  * Check the arguments.
  */
   if(!gl || !filename) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "_gl_read_config_file: Invalid arguments.\n");
     return 1;
   };
 /*
@@ -6284,8 +5215,8 @@ static int _gl_read_config_file(GetLine *gl, const char *filename, KtBinder who)
  */
   expansion = ef_expand_file(gl->ef, filename, -1);
   if(!expansion) {
-    gl_print_info(gl, "Unable to expand ", filename, " (",
-		  ef_last_error(gl->ef), ").", GL_END_INFO);
+    fprintf(stderr, "Unable to expand %s (%s).\n", filename,
+            ef_last_error(gl->ef));
     return 1;
   };
 /*
@@ -6313,7 +5244,6 @@ static int _gl_read_config_file(GetLine *gl, const char *filename, KtBinder who)
  */
   (void) fclose(fp);
   return waserr;
-#endif
 }
 
 /*.......................................................................
@@ -6330,9 +5260,7 @@ static int _gl_read_config_string(GetLine *gl, const char *buffer, KtBinder who)
  * Check the arguments.
  */
   if(!gl || !buffer) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "_gl_read_config_string: Invalid arguments.\n");
     return 1;
   };
 /*
@@ -6431,8 +5359,8 @@ static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
  * Start recording the next argument.
  */
       if(argc >= GL_CONF_MAXARG) {
-	gl_report_config_error(gl, origin, *lineno, "Too many arguments.");
-	do c = getc_fn(stream); while(c!='\n' && c!=EOF);  /* Skip past eol */
+	fprintf(stderr, "%s:%d: Too many arguments.\n", origin, *lineno);
+	do c = getc_fn(stream); while(c != '\n' && c != EOF); /* Skip past eol */
 	return 0;
       };
       argv[argc] = buffer + i;
@@ -6473,7 +5401,7 @@ static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
  * Did the buffer overflow?
  */
   if(i>=GL_CONF_BUFLEN) {
-    gl_report_config_error(gl, origin, *lineno, "Line too long.");
+    fprintf(stderr, "%s:%d: Line too long.\n", origin, *lineno);
     return 0;
   };
 /*
@@ -6491,12 +5419,12 @@ static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
  * Attempt to record the new keybinding.
  */
       if(_kt_set_keybinding(gl->bindings, who, keyseq, action)) {
-	gl_report_config_error(gl, origin, *lineno,
-			       _kt_last_error(gl->bindings));
+	fprintf(stderr, "The error occurred at line %d of %s.\n", *lineno,
+		origin);
       };
       break;
     default:
-      gl_report_config_error(gl, origin, *lineno, "Wrong number of arguments.");
+      fprintf(stderr, "%s:%d: Wrong number of arguments.\n", origin, *lineno);
     };
   } else if(strcmp(argv[0], "edit-mode") == 0) {
     if(argc == 2 && strcmp(argv[1], "emacs") == 0) {
@@ -6506,13 +5434,14 @@ static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
     } else if(argc == 2 && strcmp(argv[1], "none") == 0) {
       gl_change_editor(gl, GL_NO_EDITOR);
     } else {
-      gl_report_config_error(gl, origin, *lineno,
-			     "The argument of editor should be vi or emacs.");
+      fprintf(stderr, "%s:%d: The argument of editor should be vi or emacs.\n",
+	      origin, *lineno);
     };
   } else if(strcmp(argv[0], "nobeep") == 0) {
     gl->silence_bell = 1;
   } else {
-    gl_report_config_error(gl, origin, *lineno, "Unknown command name.");
+    fprintf(stderr, "%s:%d: Unknown command name '%s'.\n", origin, *lineno,
+	    argv[0]);
   };
 /*
  * Skip any trailing comment.
@@ -6521,35 +5450,6 @@ static int _gl_parse_config_line(GetLine *gl, void *stream, GlcGetcFn *getc_fn,
     c = getc_fn(stream);
   (*lineno)++;
   return 0;
-}
-
-/*.......................................................................
- * This is a private function of _gl_parse_config_line() which prints
- * out an error message about the contents of the line, prefixed by the
- * name of the origin of the line and its line number.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- *  origin  const char *  The name of the entity being read (eg. a
- *                        file name).
- *  lineno         int    The line number at which the error occurred.
- *  errmsg  const char *  The error message.
- * Output:
- *  return         int    0 - OK.
- *                        1 - Error.
- */
-static int gl_report_config_error(GetLine *gl, const char *origin, int lineno,
-				  const char *errmsg)
-{
-  char lnum[20];   /* A buffer in which to render a single integer */
-/*
- * Convert the line number into a string.
- */
-  sprintf(lnum, "%d", lineno);
-/*
- * Have the string printed on the terminal.
- */
-  return gl_print_info(gl, origin, ":", lnum, ": ", errmsg, GL_END_INFO);
 }
 
 /*.......................................................................
@@ -6572,7 +5472,6 @@ static GLC_GETC_FN(glc_buff_getc)
   return **lptr ? *(*lptr)++ : EOF;
 }
 
-#ifndef HIDE_FILE_SYSTEM
 /*.......................................................................
  * When this action is triggered, it arranges to temporarily read command
  * lines from the regular file whos name precedes the cursor.
@@ -6584,10 +5483,12 @@ static KT_KEY_FN(gl_read_from_file)
                           /*  gl->line[]. */
   FileExpansion *result;  /* The results of the filename expansion */
   int pathlen;            /* The length of the pathname being expanded */
+  int error_reported = 0; /* True after an error has been reported */
 /*
  * Locate the start of the filename that precedes the cursor position.
  */
-  start_path = _pu_start_of_path(gl->line, gl->buff_curpos);
+  start_path = _pu_start_of_path(gl->line,
+				 gl->buff_curpos > 0 ? gl->buff_curpos : 0);
   if(!start_path)
     return 1;
 /*
@@ -6599,20 +5500,29 @@ static KT_KEY_FN(gl_read_from_file)
  */
   result = ef_expand_file(gl->ef, start_path, pathlen);
 /*
- * If there was an error, report the error on a new line.
+ * If there was an error, report the error on a new line, then redraw
+ * the original line.
  */
   if(!result) {
-    return gl_print_info(gl, ef_last_error(gl->ef), GL_END_INFO);
+    if(gl->echo &&
+       fprintf(gl->output_fp, "\r\n%s\n", ef_last_error(gl->ef)) < 0)
+      return 1;
+    error_reported = 1;
 /*
  * If no files matched, report this as well.
  */
   } else if(result->nfile == 0 || !result->exists) {
-    return gl_print_info(gl, "No files match.", GL_END_INFO);
+    if(gl->echo && fprintf(gl->output_fp, "\r\nNo files match.\n") < 0)
+      return 1;
+    error_reported = 1;
 /*
  * Complain if more than one file matches.
  */
   } else if(result->nfile > 1) {
-    return gl_print_info(gl, "More than one file matches.", GL_END_INFO);
+    if(gl->echo &&
+       fprintf(gl->output_fp, "\r\nMore than one file matches.\n") < 0)
+      return 1;
+    error_reported = 1;
 /*
  * Disallow input from anything but normal files. In principle we could
  * also support input from named pipes. Terminal files would be a problem
@@ -6620,43 +5530,36 @@ static KT_KEY_FN(gl_read_from_file)
  * might cause the library to lock up.
  */
   } else if(!_pu_path_is_file(result->files[0])) {
-    return gl_print_info(gl, "Not a normal file.", GL_END_INFO);
+    if(gl->echo && fprintf(gl->output_fp, "\r\nNot a normal file.\n") < 0)
+      return 1;
+    error_reported = 1;
   } else {
 /*
  * Attempt to open and install the specified file for reading.
  */
     gl->file_fp = fopen(result->files[0], "r");
     if(!gl->file_fp) {
-      return gl_print_info(gl, "Unable to open: ", result->files[0],
-			   GL_END_INFO);
-    };
-/*
- * If needed, expand the record of the maximum file-descriptor that might
- * need to be monitored with select().
- */
-#ifdef HAVE_SELECT
-    if(fileno(gl->file_fp) > gl->max_fd)
-      gl->max_fd = fileno(gl->file_fp);
-#endif
-/*
- * Is non-blocking I/O needed?
- */
-    if(gl->raw_mode && gl->io_mode==GL_SERVER_MODE &&
-       gl_nonblocking_io(gl, fileno(gl->file_fp))) {
-      gl_revert_input(gl);
-      return gl_print_info(gl, "Can't read file %s with non-blocking I/O",
-			   result->files[0]);
+      if(gl->echo && fprintf(gl->output_fp, "\r\nUnable to open: %s\n",
+		 result->files[0]) < 0)
+	return 1;
+      error_reported = 1;
     };
 /*
  * Inform the user what is happening.
  */
-    if(gl_print_info(gl, "<Taking input from ", result->files[0], ">",
-		     GL_END_INFO))
+    if(gl->echo && fprintf(gl->output_fp, "\r\n<Taking input from %s>\n",
+			   result->files[0]) < 0)
       return 1;
+  };
+/*
+ * If an error was reported, redisplay the current line.
+ */
+  if(error_reported) {
+    gl->term_curpos = 0;
+    return gl_redisplay(gl,1);
   };
   return 0;
 }
-#endif
 
 /*.......................................................................
  * Close any temporary file that is being used for input.
@@ -6669,7 +5572,6 @@ static void gl_revert_input(GetLine *gl)
   if(gl->file_fp)
     fclose(gl->file_fp);
   gl->file_fp = NULL;
-  gl->endline = 1;
 }
 
 /*.......................................................................
@@ -6688,27 +5590,22 @@ static KT_KEY_FN(gl_beginning_of_history)
  */
   gl->preload_id = 0;
 /*
- * Record the key sequence number of this search action.
- */
-  gl->last_search = gl->keyseq_count;
-/*
  * Recall the next oldest line in the history list.
  */
-  if(_glh_oldest_line(gl->glh, gl->line, gl->linelen+1) == NULL)
+  if(_glh_oldest_line(gl->glh, gl->line, gl->linelen) == NULL)
     return 0;
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange to have the cursor placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -6728,27 +5625,22 @@ static KT_KEY_FN(gl_end_of_history)
  */
   gl->preload_id = 0;
 /*
- * Record the key sequence number of this search action.
- */
-  gl->last_search = gl->keyseq_count;
-/*
  * Recall the next oldest line in the history list.
  */
-  if(_glh_current_line(gl->glh, gl->line, gl->linelen+1) == NULL)
+  if(_glh_current_line(gl->glh, gl->line, gl->linelen) == NULL)
     return 0;
 /*
- * Accomodate the new contents of gl->line[].
+ * Record the number of characters in the new string.
  */
-  gl_update_buffer(gl);
+  gl->ntotal = strlen(gl->line);
 /*
  * Arrange to have the cursor placed at the end of the new line.
  */
-  gl->buff_curpos = gl->ntotal;
+  gl->buff_curpos = strlen(gl->line);
 /*
  * Erase and display the new line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -6767,7 +5659,7 @@ static KT_KEY_FN(gl_digit_argument)
  * In vi command mode, a lone '0' means goto-start-of-line.
  */
   if(gl->vi.command && gl->number < 0 && count == '0')
-    return gl_beginning_of_line(gl, count, NULL);
+    return gl_beginning_of_line(gl, count);
 /*
  * Are we starting to accumulate a new number?
  */
@@ -6833,92 +5725,19 @@ static KT_KEY_FN(gl_repeat_history)
  *  gl     GetLine *  The getline resource object.
  * Output:
  *  return     int    0 - OK.
- *                    1 - Either an error occured, or the output
- *                        blocked and non-blocking I/O is being used.
- *                        See gl->rtn_status for details.
+ *                    1 - Error.
  */
 static int gl_flush_output(GetLine *gl)
 {
 /*
- * Record the fact that we are about to write to the terminal.
+ * Attempt to flush output to the terminal, restarting the output
+ * if a signal is caught.
  */
-  gl->pending_io = GLP_WRITE;
-/*
- * Attempt to flush the output to the terminal.
- */
-  errno = 0;
-  switch(_glq_flush_queue(gl->cq, gl->flush_fn, gl)) {
-  case GLQ_FLUSH_DONE:
-    return gl->redisplay && !gl->postpone && gl_redisplay(gl, 1, NULL);
-    break;
-  case GLQ_FLUSH_AGAIN:      /* Output blocked */
-    gl_record_status(gl, GLR_BLOCKED, BLOCKED_ERRNO);
-    return 1;
-    break;
-  default:                   /* Abort the line if an error occurs */
-    gl_record_status(gl, errno==EINTR ? GLR_SIGNAL : GLR_ERROR, errno);
-    return 1;
-    break;
+  while(fflush(gl->output_fp) != 0) {
+    if(errno!=EINTR)
+      return 1;
   };
-}
-
-/*.......................................................................
- * This is the callback which _glq_flush_queue() uses to write buffered
- * characters to the terminal.
- */
-static GL_WRITE_FN(gl_flush_terminal)
-{
-  int ndone = 0;    /* The number of characters written so far */
-/*
- * Get the line-editor resource object.
- */
-  GetLine *gl = (GetLine *) data;
-/*
- * Transfer the latest array of characters to stdio.
- */
-  while(ndone < n) {
-    int nnew = write(gl->output_fd, s, n-ndone);
-/*
- * If the write was successful, add to the recorded number of bytes
- * that have now been written.
- */
-    if(nnew > 0) {
-      ndone += nnew;
-/*
- * If a signal interrupted the call, restart the write(), since all of
- * the signals that gl_get_line() has been told to watch for are
- * currently blocked.
- */
-    } else if(errno == EINTR) {
-      continue;
-/*
- * If we managed to write something before an I/O error occurred, or
- * output blocked before anything was written, report the number of
- * bytes that were successfully written before this happened.
- */
-    } else if(ndone > 0
-#if defined(EAGAIN)
-	      || errno==EAGAIN
-#endif
-#if defined(EWOULDBLOCK)
-	      || errno==EWOULDBLOCK
-#endif
-	      ) {
-      return ndone;
-
-/*
- * To get here, an error must have occurred before anything new could
- * be written.
- */
-    } else {
-      return -1;
-    };
-  };
-/*
- * To get here, we must have successfully written the number of
- * bytes that was specified.
- */
-  return n;
+  return 0;
 }
 
 /*.......................................................................
@@ -6952,8 +5771,7 @@ static int gl_change_editor(GetLine *gl, GlEditor editor)
   case GL_NO_EDITOR:
     break;
   default:
-    _err_record_msg(gl->err, "Unknown editor", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "gl_change_editor: Unknown editor.\n");
     return 1;
   };
 /*
@@ -7053,14 +5871,14 @@ static KT_KEY_FN(gl_change_case)
  * Convert the character to upper case?
  */
     if(islower((int)(unsigned char) *cptr))
-      gl_buffer_char(gl, toupper((int) *cptr), cptr - gl->line);
+      *cptr = toupper((int) *cptr);
     else if(isupper((int)(unsigned char) *cptr))
-      gl_buffer_char(gl, tolower((int) *cptr), cptr - gl->line);
+      *cptr = tolower((int) *cptr);
 /*
  * Write the possibly modified character back. Note that for non-modified
  * characters we want to do this as well, so as to advance the cursor.
  */
-      if(gl_print_char(gl, *cptr, cptr[1]))
+      if(gl_output_char(gl, *cptr, cptr[1]))
 	return 1;
   };
 /*
@@ -7077,8 +5895,8 @@ static KT_KEY_FN(gl_change_case)
 static KT_KEY_FN(gl_vi_insert_at_bol)
 {
   gl_save_for_undo(gl);
-  return gl_beginning_of_line(gl, 0, NULL) ||
-         gl_vi_insert(gl, 0, NULL);
+  return gl_beginning_of_line(gl, 0) ||
+         gl_vi_insert(gl, 0);
          
 }
 
@@ -7091,8 +5909,8 @@ static KT_KEY_FN(gl_vi_append_at_eol)
 {
   gl_save_for_undo(gl);
   gl->vi.command = 0;	/* Allow cursor at EOL */
-  return gl_end_of_line(gl, 0, NULL) ||
-         gl_vi_insert(gl, 0, NULL);
+  return gl_end_of_line(gl, 0) ||
+         gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7104,8 +5922,8 @@ static KT_KEY_FN(gl_vi_append)
 {
   gl_save_for_undo(gl);
   gl->vi.command = 0;	/* Allow cursor at EOL */
-  return gl_cursor_right(gl, 1, NULL) ||
-         gl_vi_insert(gl, 0, NULL);
+  return gl_cursor_right(gl, 1) ||
+         gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7135,7 +5953,7 @@ static KT_KEY_FN(gl_vi_replace_char)
   if(gl->vi.repeat.active) {
     c = gl->vi.repeat.input_char;
   } else {
-    if(gl_read_terminal(gl, 1, &c))
+    if(gl_read_character(gl, &c))
       return 1;
     gl->vi.repeat.input_char = c;
   };
@@ -7174,7 +5992,7 @@ static KT_KEY_FN(gl_vi_change_rest_of_line)
 {
   gl_save_for_undo(gl);
   gl->vi.command = 0;	/* Allow cursor at EOL */
-  return gl_kill_line(gl, count, NULL) || gl_vi_insert(gl, 0, NULL);
+  return gl_kill_line(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7183,7 +6001,7 @@ static KT_KEY_FN(gl_vi_change_rest_of_line)
  */
 static KT_KEY_FN(gl_vi_change_to_bol)
 {
-  return gl_backward_kill_line(gl,count,NULL) || gl_vi_insert(gl,0,NULL);
+  return gl_backward_kill_line(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7192,7 +6010,7 @@ static KT_KEY_FN(gl_vi_change_to_bol)
  */
 static KT_KEY_FN(gl_vi_change_line)
 {
-  return gl_delete_line(gl,count,NULL) || gl_vi_insert(gl,0,NULL);
+  return gl_delete_line(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7246,9 +6064,9 @@ static KT_KEY_FN(gl_backward_copy_char)
 static KT_KEY_FN(gl_copy_to_column)
 {
   if (--count >= gl->buff_curpos)
-    return gl_forward_copy_char(gl, count - gl->buff_curpos, NULL);
+    return gl_forward_copy_char(gl, count - gl->buff_curpos);
   else
-    return gl_backward_copy_char(gl, gl->buff_curpos - count, NULL);
+    return gl_backward_copy_char(gl, gl->buff_curpos - count);
 }
 
 /*.......................................................................
@@ -7261,9 +6079,9 @@ static KT_KEY_FN(gl_copy_to_parenthesis)
   if(curpos >= 0) {
     gl_save_for_undo(gl);
     if(curpos >= gl->buff_curpos)
-      return gl_forward_copy_char(gl, curpos - gl->buff_curpos + 1, NULL);
+      return gl_forward_copy_char(gl, curpos - gl->buff_curpos + 1);
     else
-      return gl_backward_copy_char(gl, ++gl->buff_curpos - curpos + 1, NULL);
+      return gl_backward_copy_char(gl, ++gl->buff_curpos - curpos + 1);
   };
   return 0;
 }
@@ -7382,7 +6200,7 @@ static int gl_find_char(GetLine *gl, int count, int forward, int onto, char c)
     if(gl->vi.repeat.active) {
       c = gl->vi.find_char;
     } else {
-      if(gl_read_terminal(gl, 1, &c))
+      if(gl_read_character(gl, &c))
 	return -1;
 /*
  * Record the details of the new search, for use by repeat finds.
@@ -7451,7 +6269,7 @@ static int gl_find_char(GetLine *gl, int count, int forward, int onto, char c)
   if(pos >= gl->insert_curpos && pos < gl->ntotal) {
     return pos;
   } else {
-    (void) gl_ring_bell(gl, 1, NULL);
+    (void) gl_ring_bell(gl, 1);
     return -1;
   }
 }
@@ -7795,8 +6613,7 @@ static int gl_place_cursor(GetLine *gl, int buff_curpos)
 /*
  * Move the terminal cursor to the corresponding character.
  */
-  return gl_set_term_curpos(gl, gl->prompt_len +
-    gl_displayed_string_width(gl, gl->line, buff_curpos, gl->prompt_len));
+  return gl_set_term_curpos(gl, gl_buff_curpos_to_term_curpos(gl, buff_curpos));
 }
 
 /*.......................................................................
@@ -7819,8 +6636,8 @@ static void gl_save_for_undo(GetLine *gl)
     gl->vi.undo.saved = 1;
   };
   if(gl->vi.command && !gl->vi.repeat.saved &&
-     gl->current_action.fn != gl_vi_repeat_change) {
-    gl->vi.repeat.action = gl->current_action;
+     gl->current_fn != gl_vi_repeat_change) {
+    gl->vi.repeat.fn = gl->current_fn;
     gl->vi.repeat.count = gl->current_count;
     gl->vi.repeat.saved = 1;
   };
@@ -7859,13 +6676,13 @@ static KT_KEY_FN(gl_vi_undo)
     *undo_ptr = '\0';
   };
 /*
- * Record the length of the stored string.
+ * Swap the length information.
  */
-  gl->vi.undo.ntotal = gl->ntotal;
-/*
- * Accomodate the new contents of gl->line[].
- */
-  gl_update_buffer(gl);
+  {
+    int ntotal = gl->ntotal;
+    gl->ntotal = gl->vi.undo.ntotal;
+    gl->vi.undo.ntotal = ntotal;
+  };
 /*
  * Set both cursor positions to the leftmost of the saved and current
  * cursor positions to emulate what vi does.
@@ -7878,14 +6695,12 @@ static KT_KEY_FN(gl_vi_undo)
  * Since we have bipassed calling gl_save_for_undo(), record repeat
  * information inline.
  */
-  gl->vi.repeat.action.fn = gl_vi_undo;
-  gl->vi.repeat.action.data = NULL;
+  gl->vi.repeat.fn = gl_vi_undo;
   gl->vi.repeat.count = 1;
 /*
  * Display the restored line.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -7895,7 +6710,7 @@ static KT_KEY_FN(gl_vi_forward_change_word)
 {
   gl_save_for_undo(gl);
   gl->vi.command = 0;	/* Allow cursor at EOL */
-  return gl_forward_delete_word(gl, count, NULL) || gl_vi_insert(gl, 0, NULL);
+  return gl_forward_delete_word(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7903,7 +6718,7 @@ static KT_KEY_FN(gl_vi_forward_change_word)
  */
 static KT_KEY_FN(gl_vi_backward_change_word)
 {
-  return gl_backward_delete_word(gl, count, NULL) || gl_vi_insert(gl, 0, NULL);
+  return gl_backward_delete_word(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7965,7 +6780,7 @@ static KT_KEY_FN(gl_vi_forward_change_char)
 {
   gl_save_for_undo(gl);
   gl->vi.command = 0;	/* Allow cursor at EOL */
-  return gl_delete_chars(gl, count, 1) || gl_vi_insert(gl, 0, NULL);
+  return gl_delete_chars(gl, count, 1) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7973,7 +6788,7 @@ static KT_KEY_FN(gl_vi_forward_change_char)
  */
 static KT_KEY_FN(gl_vi_backward_change_char)
 {
-  return gl_backward_delete_char(gl, count, NULL) || gl_vi_insert(gl, 0, NULL);
+  return gl_backward_delete_char(gl, count) || gl_vi_insert(gl, 0);
 }
 
 /*.......................................................................
@@ -7982,9 +6797,9 @@ static KT_KEY_FN(gl_vi_backward_change_char)
 static KT_KEY_FN(gl_vi_change_to_column)
 {
   if (--count >= gl->buff_curpos)
-    return gl_vi_forward_change_char(gl, count - gl->buff_curpos, NULL);
+    return gl_vi_forward_change_char(gl, count - gl->buff_curpos);
   else
-    return gl_vi_backward_change_char(gl, gl->buff_curpos - count, NULL);
+    return gl_vi_backward_change_char(gl, gl->buff_curpos - count);
 }
 
 /*.......................................................................
@@ -7997,10 +6812,9 @@ static KT_KEY_FN(gl_vi_change_to_parenthesis)
   if(curpos >= 0) {
     gl_save_for_undo(gl);
     if(curpos >= gl->buff_curpos)
-      return gl_vi_forward_change_char(gl, curpos - gl->buff_curpos + 1, NULL);
+      return gl_vi_forward_change_char(gl, curpos - gl->buff_curpos + 1);
     else
-      return gl_vi_backward_change_char(gl, ++gl->buff_curpos - curpos + 1,
-					NULL);
+      return gl_vi_backward_change_char(gl, ++gl->buff_curpos - curpos + 1);
   };
   return 0;
 }
@@ -8018,8 +6832,8 @@ static void gl_vi_command_mode(GetLine *gl)
     gl->vi.command = 1;
     gl->vi.repeat.input_curpos = gl->insert_curpos;
     gl->vi.repeat.command_curpos = gl->buff_curpos;
-    gl->insert_curpos = 0;	 /* unrestrict left motion boundary */
-    gl_cursor_left(gl, 1, NULL); /* Vi moves 1 left on entering command mode */
+    gl->insert_curpos = 0;	/* unrestrict left motion boundary */
+    gl_cursor_left(gl, 1); /* Vi moves left one on entering command mode */
   };
 }
 
@@ -8029,7 +6843,7 @@ static void gl_vi_command_mode(GetLine *gl)
 static KT_KEY_FN(gl_ring_bell)
 {
   return gl->silence_bell ? 0 :
-    gl_print_control_sequence(gl, 1, gl->sound_bell);
+    gl_output_control_sequence(gl, 1, gl->sound_bell);
 }
 
 /*.......................................................................
@@ -8043,8 +6857,8 @@ static KT_KEY_FN(gl_vi_repeat_change)
 /*
  * Nothing to repeat?
  */
-  if(!gl->vi.repeat.action.fn)
-    return gl_ring_bell(gl, 1, NULL);
+  if(!gl->vi.repeat.fn)
+    return gl_ring_bell(gl, 1);
 /*
  * Provide a way for action functions to know whether they are being
  * called by us.
@@ -8053,8 +6867,7 @@ static KT_KEY_FN(gl_vi_repeat_change)
 /*
  * Re-run the recorded function.
  */
-  status = gl->vi.repeat.action.fn(gl, gl->vi.repeat.count,
-				   gl->vi.repeat.action.data);
+  status = gl->vi.repeat.fn(gl, gl->vi.repeat.count);
 /*
  * Mark the repeat as completed.
  */
@@ -8158,7 +6971,7 @@ static int gl_index_of_matching_paren(GetLine *gl)
 /*
  * Not found.
  */
-  (void) gl_ring_bell(gl, 1, NULL);
+  (void) gl_ring_bell(gl, 1);
   return -1;
 }
 
@@ -8187,6 +7000,7 @@ static KT_KEY_FN(gl_find_parenthesis)
  */
 static int gl_interpret_char(GetLine *gl, char first_char)
 {
+  KtKeyFn *keyfn;            /* An action function */
   char keyseq[GL_KEY_MAX+1]; /* A special key sequence being read */
   int nkey=0;                /* The number of characters in the key sequence */
   int count;                 /* The repeat count of an action function */
@@ -8197,30 +7011,28 @@ static int gl_interpret_char(GetLine *gl, char first_char)
  */
   char c = first_char;
 /*
- * If editing is disabled, just add newly entered characters to the
+ * If editting is disabled, just add newly entered characters to the
  * input line buffer, and watch for the end of the line.
  */
   if(gl->editor == GL_NO_EDITOR) {
-    gl_discard_chars(gl, 1);
     if(gl->ntotal >= gl->linelen)
       return 0;
     if(c == '\n' || c == '\r')
-      return gl_newline(gl, 1, NULL);
-    gl_buffer_char(gl, c, gl->ntotal);
+      return gl_newline(gl, 1);
+    gl->line[gl->ntotal++] = c;
     return 0;
   };
 /*
  * If the user is in the process of specifying a repeat count and the
  * new character is a digit, increment the repeat count accordingly.
  */
-  if(gl->number >= 0 && isdigit((int)(unsigned char) c)) {
-    gl_discard_chars(gl, 1);
-    return gl_digit_argument(gl, c, NULL);
+  if(gl->number >= 0 && isdigit((int)(unsigned char) c))
+    return gl_digit_argument(gl, c);
 /*
  * In vi command mode, all key-sequences entered need to be
  * either implicitly or explicitly prefixed with an escape character.
  */
-  } else if(gl->vi.command && c != GL_ESC_CHAR) {
+  else if(gl->vi.command && c != GL_ESC_CHAR)
     keyseq[nkey++] = GL_ESC_CHAR;
 /*
  * If the first character of the sequence is a printable character,
@@ -8228,16 +7040,13 @@ static int gl_interpret_char(GetLine *gl, char first_char)
  * or "right" cursor key bindings, we need to prefix the
  * printable character with a backslash escape before looking it up.
  */
-  } else if(!IS_META_CHAR(c) && !IS_CTRL_CHAR(c)) {
+  else if(!IS_META_CHAR(c) && !IS_CTRL_CHAR(c))
     keyseq[nkey++] = '\\';
-  };
 /*
  * Compose a potentially multiple key-sequence in gl->keyseq.
  */
   while(nkey < GL_KEY_MAX) {
-    KtAction *action; /* An action function */
-    KeySym *keysym;   /* The symbol-table entry of a key-sequence */
-    int nsym;         /* The number of ambiguously matching key-sequences */
+    int first, last;   /* The matching entries in gl->keys */
 /*
  * If the character is an unprintable meta character, split it
  * into two characters, an escape character and the character
@@ -8261,17 +7070,17 @@ static int gl_interpret_char(GetLine *gl, char first_char)
 /*
  * Lookup the key sequence.
  */
-    switch(_kt_lookup_keybinding(gl->bindings, keyseq, nkey, &keysym, &nsym)) {
+    switch(_kt_lookup_keybinding(gl->bindings, keyseq, nkey, &first, &last)) {
     case KT_EXACT_MATCH:
 /*
  * Get the matching action function.
  */
-      action = keysym->actions + keysym->binder;
+      keyfn = gl->bindings->table[first].keyfn;
 /*
  * Get the repeat count, passing the last keystroke if executing the
  * digit-argument action.
  */
-      if(action->fn == gl_digit_argument) {
+      if(keyfn == gl_digit_argument) {
 	count = c;
       } else {
 	count = gl->number >= 0 ? gl->number : 1;
@@ -8279,7 +7088,7 @@ static int gl_interpret_char(GetLine *gl, char first_char)
 /*
  * Record the function that is being invoked.
  */
-      gl->current_action = *action;
+      gl->current_fn = keyfn;
       gl->current_count = count;
 /*
  * Mark the current line as not yet preserved for use by the vi undo command.
@@ -8292,35 +7101,19 @@ static int gl_interpret_char(GetLine *gl, char first_char)
  * explicitly by looking at whether gl->number is -1 or not. If
  * it is negative, then no repeat count was specified by the user.
  */
-      ret = action->fn(gl, count, action->data);
+      ret = keyfn(gl, count);
 /*
- * In server mode, the action will return immediately if it tries to
- * read input from the terminal, and no input is currently available.
- * If this happens, abort. Note that gl_get_input_line() will rewind
- * the read-ahead buffer to allow the next call to redo the function
- * from scratch.
+ * Reset the repeat count after running action functions (other
+ * than digit-argument).
  */
-      if(gl->rtn_status == GLR_BLOCKED && gl->pending_io==GLP_READ)
-	return 1;
-/*
- * Discard the now processed characters from the key sequence buffer.
- */
-      gl_discard_chars(gl, gl->nread);
-/*
- * If the latest action function wasn't a history action, cancel any
- * current history search.
- */
-      if(gl->last_search != gl->keyseq_count)
-	_glh_cancel_search(gl->glh);
-/*
- * Reset the repeat count after running action functions.
- */
-      if(action->fn != gl_digit_argument)
+      if(keyfn != gl_digit_argument)
 	gl->number = -1;
-      return ret ? 1 : 0;
+      if(ret)
+	return 1;
+      return 0;
       break;
-    case KT_AMBIG_MATCH:    /* Ambiguous match - so read the next character */
-      if(gl_read_terminal(gl, 1, &c))
+    case KT_AMBIG_MATCH:             /* Ambiguous match - so look ahead */
+      if(gl_read_character(gl, &c))  /* Get the next character */
 	return 1;
       break;
     case KT_NO_MATCH:
@@ -8330,7 +7123,7 @@ static int gl_interpret_char(GetLine *gl, char first_char)
  * wasn't recognised.
  */
       if(keyseq[0] != '\\' && keyseq[0] != '\t') {
-	gl_ring_bell(gl, 1, NULL);
+	gl_ring_bell(gl, 0);
       } else {
 /*
  * The user typed a single printable character that doesn't match
@@ -8342,27 +7135,16 @@ static int gl_interpret_char(GetLine *gl, char first_char)
 	  gl_add_char_to_line(gl, first_char);
 	gl->number = -1;
       };
-      gl_discard_chars(gl, 1);
-      _glh_cancel_search(gl->glh);
       return 0;
       break;
     case KT_BAD_MATCH:
-      gl_ring_bell(gl, 1, NULL);
-      gl_discard_chars(gl, gl->nread);
-      _glh_cancel_search(gl->glh);
       return 1;
       break;
     };
   };
 /*
- * If the key sequence was too long to match, ring the bell, then
- * discard the first character, so that the next attempt to match a
- * key-sequence continues with the next key press. In practice this
- * shouldn't happen, since one isn't allowed to bind action functions
- * to keysequences that are longer than GL_KEY_MAX.
+ * Key sequence too long to match.
  */
-  gl_ring_bell(gl, 1, NULL);
-  gl_discard_chars(gl, 1);
   return 0;
 }
 
@@ -8371,7 +7153,7 @@ static int gl_interpret_char(GetLine *gl, char first_char)
  * gl_get_line().
  *
  * Note that calling this function between calling new_GetLine() and
- * the first call to gl_get_line(), disables the otherwise automatic
+ * the first call to new_GetLine(), disables the otherwise automatic
  * reading of ~/.teclarc on the first call to gl_get_line().
  *
  * Input:
@@ -8398,39 +7180,13 @@ static int gl_interpret_char(GetLine *gl, char first_char)
 int gl_configure_getline(GetLine *gl, const char *app_string,
 			 const char *app_file, const char *user_file)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_configure_getline() */
 /*
  * Check the arguments.
  */
   if(!gl) {
-    errno = EINVAL;
+    fprintf(stderr, "gl_configure_getline: NULL gl argument.\n");
     return 1;
   };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_configure_getline(gl, app_string, app_file, user_file);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_configure_getline() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_configure_getline(GetLine *gl, const char *app_string,
-				 const char *app_file, const char *user_file)
-{
 /*
  * Mark getline as having been explicitly configured.
  */
@@ -8456,10 +7212,8 @@ static int _gl_configure_getline(GetLine *gl, const char *app_string,
  */
   if(gl_record_string(&gl->app_file, app_file) ||
      gl_record_string(&gl->user_file, user_file)) {
-    errno = ENOMEM;
-    _err_record_msg(gl->err,
-	   "Insufficient memory to record tecla configuration file names",
-	   END_ERR_MSG);
+    fprintf(stderr,
+	    "Insufficient memory to record tecla configuration file names.\n");
     return 1;
   };
   return 0;
@@ -8509,16 +7263,14 @@ static int gl_record_string(char **sptr, const char *string)
   return 0;
 }
 
-#ifndef HIDE_FILE_SYSTEM
 /*.......................................................................
  * Re-read any application-specific and user-specific files previously
  * specified via the gl_configure_getline() function.
  */
 static KT_KEY_FN(gl_read_init_files)
 {
-  return _gl_configure_getline(gl, NULL, gl->app_file, gl->user_file);
+  return gl_configure_getline(gl, NULL, gl->app_file, gl->user_file);
 }
-#endif
 
 /*.......................................................................
  * Save the contents of the history buffer to a given new file.
@@ -8541,70 +7293,27 @@ static KT_KEY_FN(gl_read_init_files)
 int gl_save_history(GetLine *gl, const char *filename, const char *comment,
 		    int max_lines)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_save_history() */
+  FileExpansion *expansion; /* The expansion of the filename */
 /*
  * Check the arguments.
  */
   if(!gl || !filename || !comment) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "gl_save_history: NULL argument(s).\n");
     return 1;
   };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_save_history(gl, filename, comment, max_lines);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_save_history() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_save_history(GetLine *gl, const char *filename,
-			    const char *comment, int max_lines)
-{
-/*
- * If filesystem access is to be excluded, then history files can't
- * be written.
- */
-#ifdef WITHOUT_FILE_SYSTEM
-  _err_record_msg(gl->err, "Can't save history without filesystem access",
-		  END_ERR_MSG);
-  errno = EINVAL;
-  return 1;
-#else
-  FileExpansion *expansion; /* The expansion of the filename */
 /*
  * Expand the filename.
  */
   expansion = ef_expand_file(gl->ef, filename, -1);
   if(!expansion) {
-    gl_print_info(gl, "Unable to expand ", filename, " (",
-		  ef_last_error(gl->ef), ").", GL_END_INFO);
+    fprintf(stderr, "Unable to expand %s (%s).\n", filename,
+            ef_last_error(gl->ef));
     return 1;
   };
 /*
  * Attempt to save to the specified file.
  */
-  if(_glh_save_history(gl->glh, expansion->files[0], comment, max_lines)) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-    return 1;
-  };
-  return 0;
-#endif
+  return _glh_save_history(gl->glh, expansion->files[0], comment, max_lines);
 }
 
 /*.......................................................................
@@ -8622,73 +7331,33 @@ static int _gl_save_history(GetLine *gl, const char *filename,
  */
 int gl_load_history(GetLine *gl, const char *filename, const char *comment)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_load_history() */
+  FileExpansion *expansion; /* The expansion of the filename */
 /*
  * Check the arguments.
  */
   if(!gl || !filename || !comment) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "gl_load_history: NULL argument(s).\n");
     return 1;
   };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_load_history(gl, filename, comment);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_load_history() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_load_history(GetLine *gl, const char *filename,
-			    const char *comment)
-{
-/*
- * If filesystem access is to be excluded, then history files can't
- * be read.
- */
-#ifdef WITHOUT_FILE_SYSTEM
-  _err_record_msg(gl->err, "Can't load history without filesystem access",
-		  END_ERR_MSG);
-  errno = EINVAL;
-  return 1;
-#else
-  FileExpansion *expansion; /* The expansion of the filename */
 /*
  * Expand the filename.
  */
   expansion = ef_expand_file(gl->ef, filename, -1);
   if(!expansion) {
-    gl_print_info(gl, "Unable to expand ", filename, " (",
-		  ef_last_error(gl->ef), ").", GL_END_INFO);
+    fprintf(stderr, "Unable to expand %s (%s).\n", filename,
+            ef_last_error(gl->ef));
     return 1;
   };
 /*
  * Attempt to load from the specified file.
  */
   if(_glh_load_history(gl->glh, expansion->files[0], comment,
-		       gl->cutbuf, gl->linelen+1)) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
+		       gl->cutbuf, gl->linelen)) {
     gl->cutbuf[0] = '\0';
     return 1;
   };
   gl->cutbuf[0] = '\0';
   return 0;
-#endif
 }
 
 /*.......................................................................
@@ -8715,50 +7384,23 @@ static int _gl_load_history(GetLine *gl, const char *filename,
  */
 int gl_watch_fd(GetLine *gl, int fd, GlFdEvent event,
 		GlFdEventFn *callback, void *data)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_watch_fd() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-  if(fd < 0) {
-    _err_record_msg(gl->err, "Error: fd < 0", END_ERR_MSG);
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_watch_fd(gl, fd, event, callback, data);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_watch_fd() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_watch_fd(GetLine *gl, int fd, GlFdEvent event,
-			GlFdEventFn *callback, void *data)
 #if !defined(HAVE_SELECT)
 {return 1;}               /* The facility isn't supported on this system */
 #else
 {
   GlFdNode *prev;  /* The node that precedes 'node' in gl->fd_nodes */
   GlFdNode *node;  /* The file-descriptor node being checked */
+/*
+ * Check the arguments.
+ */
+  if(!gl) {
+    fprintf(stderr, "gl_watch_fd: NULL gl argument.\n");
+    return 1;
+  };
+  if(fd < 0) {
+    fprintf(stderr, "gl_watch_fd: Error fd < 0.\n");
+    return 1;
+  };
 /*
  * Search the list of already registered fd activity nodes for the specified
  * file descriptor.
@@ -8780,8 +7422,7 @@ static int _gl_watch_fd(GetLine *gl, int fd, GlFdEvent event,
  */
     node = (GlFdNode *) _new_FreeListNode(gl->fd_node_mem);
     if(!node) {
-      errno = ENOMEM;
-      _err_record_msg(gl->err, "Insufficient memory", END_ERR_MSG);
+      fprintf(stderr, "gl_watch_fd: Insufficient memory.\n");
       return 1;
     };
 /*
@@ -8846,108 +7487,21 @@ static int _gl_watch_fd(GetLine *gl, int fd, GlFdEvent event,
   };
   return 0;
 }
-#endif
 
 /*.......................................................................
- * On systems with the select() system call, the gl_inactivity_timeout()
- * function provides the option of setting (or cancelling) an
- * inactivity timeout. Inactivity, in this case, refers both to
- * terminal input received from the user, and to I/O on any file
- * descriptors registered by calls to gl_watch_fd(). If at any time,
- * no activity is seen for the requested time period, the specified
- * timeout callback function is called. On returning, this callback
- * returns a code which tells gl_get_line() what to do next. Note that
- * each call to gl_inactivity_timeout() replaces any previously installed
- * timeout callback, and that specifying a callback of 0, turns off
- * inactivity timing. 
- *
- * Beware that although the timeout argument includes a nano-second
- * component, few computer clocks presently have resolutions finer
- * than a few milliseconds, so asking for less than a few milliseconds
- * is equivalent to zero on a lot of systems.
- *
- * Input:
- *  gl            GetLine *  The resource object of the command-line input
- *                           module.
- *  callback  GlTimeoutFn *  The function to call when the inactivity
- *                           timeout is exceeded. To turn off
- *                           inactivity timeouts altogether, send 0.
- *  data             void *  A pointer to arbitrary data to pass to the
- *                           callback function.
- *  sec     unsigned long    The number of whole seconds in the timeout.
- *  nsec    unsigned long    The fractional number of seconds in the
- *                           timeout, expressed in nano-seconds (see
- *                           the caveat above).
- * Output:
- *  return            int    0 - OK.
- *                           1 - Either gl==NULL, or this facility isn't
- *                               available on the the host system
- *                               (ie. select() isn't available). No
- *                               error message is generated in the latter
- *                               case.
- */
-int gl_inactivity_timeout(GetLine *gl, GlTimeoutFn *timeout_fn, void *data,
-		   unsigned long sec, unsigned long nsec)
-#if !defined(HAVE_SELECT)
-{return 1;}               /* The facility isn't supported on this system */
-#else
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Install a new timeout?
- */
-  if(timeout_fn) {
-    gl->timer.dt.tv_sec = sec;
-    gl->timer.dt.tv_usec = nsec / 1000;
-    gl->timer.fn = timeout_fn;
-    gl->timer.data = data;
-  } else {
-    gl->timer.fn = 0;
-    gl->timer.data = NULL;
-  };
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return 0;
-}
-#endif
-
-/*.......................................................................
- * When select() is available, this is a private function of
- * gl_read_input() which responds to file-descriptor events registered by
- * the caller. Note that it assumes that it is being called from within
- * gl_read_input()'s sigsetjump() clause.
+ * When select() is available, this function is called by
+ * gl_read_character() to respond to file-descriptor events registered by
+ * the caller.
  *
  * Input:
  *  gl    GetLine *  The resource object of this module.
- *  fd        int    The file descriptor to be watched for user input.
  * Output:
- *  return    int    0 - OK.
+ *  return    int    0 - A character is waiting to be read from the
+ *                       terminal.
  *                   1 - An error occurred.
  */
-static int gl_event_handler(GetLine *gl, int fd)
-#if !defined(HAVE_SELECT)
-{return 0;}
-#else
+static int gl_event_handler(GetLine *gl)
 {
-/*
- * Set up a zero-second timeout.
- */
-  struct timeval zero;
-  zero.tv_sec = zero.tv_usec = 0;
 /*
  * If at any time no external callbacks remain, quit the loop return,
  * so that we can simply wait in read(). This is designed as an
@@ -8955,8 +7509,7 @@ static int gl_event_handler(GetLine *gl, int fd)
  * this function, but since callbacks can delete themselves, it can
  * also help later.
  */
-  while(gl->fd_nodes || gl->timer.fn) {
-    int nready;   /* The number of file descriptors that are ready for I/O */
+  while(gl->fd_nodes) {
 /*
  * Get the set of descriptors to be watched.
  */
@@ -8964,61 +7517,31 @@ static int gl_event_handler(GetLine *gl, int fd)
     fd_set wfds = gl->wfds;
     fd_set ufds = gl->ufds;
 /*
- * Get the appropriate timeout.
- */
-    struct timeval dt = gl->timer.fn ? gl->timer.dt : zero;
-/*
- * Add the specified user-input file descriptor tot he set that is to
- * be watched.
- */
-    FD_SET(fd, &rfds);
-/*
- * Unblock the signals that we are watching, while select is blocked
- * waiting for I/O.
- */
-    gl_catch_signals(gl);
-/*
  * Wait for activity on any of the file descriptors.
  */
-    nready = select(gl->max_fd+1, &rfds, &wfds, &ufds,
-	    (gl->timer.fn || gl->io_mode==GL_SERVER_MODE) ? &dt : NULL);
-/*
- * We don't want to do a longjmp in the middle of a callback that
- * might be modifying global or heap data, so block all the signals
- * that we are trapping before executing callback functions. Note that
- * the caller will unblock them again when it needs to, so there is
- * no need to undo this before returning.
- */
-    gl_mask_signals(gl, NULL);
+    int nready = select(gl->max_fd+1, &rfds, &wfds, &ufds, NULL);
 /*
  * If select() returns but none of the file descriptors are reported
  * to have activity, then select() timed out.
  */
     if(nready == 0) {
-/*
- * Note that in non-blocking server mode, the inactivity timer is used
- * to allow I/O to block for a specified amount of time, so in this
- * mode we return the postponed blocked status when an abort is
- * requested.
- */
-      if(gl_call_timeout_handler(gl)) {
-	return 1;
-      } else if(gl->io_mode == GL_SERVER_MODE) {
-	gl_record_status(gl, GLR_BLOCKED, BLOCKED_ERRNO);
-	return 1;
-      };
+      fprintf(stdout, "\r\nUnexpected select() timeout\r\n");
+      return 1;
 /*
  * If nready < 0, this means an error occurred.
  */
     } else if(nready < 0) {
       if(errno != EINTR) {
-	gl_record_status(gl, GLR_ERROR, errno);
+#ifdef EAGAIN
+	if(!errno)          /* This can happen with SysV O_NDELAY */
+	  errno = EAGAIN;
+#endif
 	return 1;
       };
 /*
- * If the user-input file descriptor has data available, return.
+ * If the terminal input file descriptor has data available, return.
  */
-    } else if(FD_ISSET(fd, &rfds)) {
+    } else if(FD_ISSET(gl->input_fd, &rfds)) {
       return 0;
 /*
  * Check for activity on any of the file descriptors registered by the
@@ -9047,25 +7570,17 @@ static int gl_event_handler(GetLine *gl, int fd)
 /*
  * Is the fd writable?
  */
-	} else if(node->wr.fn && FD_ISSET(node->fd, &wfds)) {
+	} else if(node->wr.fn && FD_ISSET(node->fd, &rfds)) {
 	  if(gl_call_fd_handler(gl, &node->wr, node->fd, GLFD_WRITE))
 	    return 1;
 	  break;  /* The callback may have changed the list of nodes */
 	};
       };
     };
-/*
- * Just in case the above event handlers asked for the input line to
- * be redrawn, flush any pending output.
- */
-    if(gl_flush_output(gl))
-      return 1;
   };
   return 0;
 }
-#endif
 
-#if defined(HAVE_SELECT)
 /*.......................................................................
  * This is a private function of gl_event_handler(), used to call a
  * file-descriptor callback.
@@ -9083,20 +7598,33 @@ static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
 			      GlFdEvent event)
 {
   Termios attr;       /* The terminal attributes */
+  int redisplay = 0;  /* True to have the input line redisplayed */
   int waserr = 0;     /* True after any error */
+/*
+ * We don't want to do a longjmp in the middle of a callback that
+ * might be modifying global or heap data, so block all the signals
+ * that we are trapping.
+ */
+#ifndef __rtems__
+  if(sigprocmask(SIG_BLOCK, &gl->new_signal_set, NULL) == -1) {
+    fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
+    return 1;
+  };
+#endif
 /*
  * Re-enable conversion of newline characters to carriage-return/linefeed,
  * so that the callback can write to the terminal without having to do
  * anything special.
  */
   if(tcgetattr(gl->input_fd, &attr)) {
-    _err_record_msg(gl->err, "tcgetattr error", END_ERR_MSG);
+    fprintf(stderr, "\r\ngetline(): tcgetattr error: %s\r\n", strerror(errno));
     return 1;
   };
   attr.c_oflag |= OPOST;
   while(tcsetattr(gl->input_fd, TCSADRAIN, &attr)) {
-    if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
+    if (errno != EINTR) {
+      fprintf(stderr, "\r\ngetline(): tcsetattr error: %s\r\n",
+	      strerror(errno));
       return 1;
     };
   };
@@ -9106,99 +7634,41 @@ static int gl_call_fd_handler(GetLine *gl, GlFdHandler *gfh, int fd,
   switch(gfh->fn(gl, gfh->data, fd, event)) {
   default:
   case GLFD_ABORT:
-    gl_record_status(gl, GLR_FDABORT, 0);
     waserr = 1;
     break;
   case GLFD_REFRESH:
-    gl_queue_redisplay(gl);
+    redisplay = 1;
     break;
   case GLFD_CONTINUE:
+    redisplay = gl->prompt_changed;
     break;
   };
 /*
- * If the callback function called gl_normal_io(), restore raw mode,
- * and queue a redisplay of the input line.
- */
-  if(!gl->raw_mode)
-    waserr = waserr || _gl_raw_io(gl, 1);
-/*
  * Disable conversion of newline characters to carriage-return/linefeed.
  */
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
   attr.c_oflag &= ~(OPOST);
   while(tcsetattr(gl->input_fd, TCSADRAIN, &attr)) {
     if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
+      fprintf(stderr, "\ngetline(): tcsetattr error: %s\n", strerror(errno));
       return 1;
     };
   };
-  return waserr;
-}
-
-/*.......................................................................
- * This is a private function of gl_event_handler(), used to call a
- * inactivity timer callbacks.
- *
- * Input:
- *  gl       GetLine *  The resource object of gl_get_line().
- * Output:
- *  return       int    0 - OK.
- *                      1 - Error.
- */
-static int gl_call_timeout_handler(GetLine *gl)
-{
-  Termios attr;       /* The terminal attributes */
-  int waserr = 0;     /* True after any error */
+#endif
 /*
- * Make sure that there is an inactivity timeout callback.
+ * If requested, redisplay the input line.
  */
-  if(!gl->timer.fn)
-    return 0;
-/*
- * Re-enable conversion of newline characters to carriage-return/linefeed,
- * so that the callback can write to the terminal without having to do
- * anything special.
- */
-  if(tcgetattr(gl->input_fd, &attr)) {
-    _err_record_msg(gl->err, "tcgetattr error", END_ERR_MSG);
+  if(redisplay && gl_redisplay(gl, 1))
     return 1;
-  };
-  attr.c_oflag |= OPOST;
-  while(tcsetattr(gl->input_fd, TCSADRAIN, &attr)) {
-    if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
-      return 1;
-    };
-  };
 /*
- * Invoke the application's callback function.
+ * Unblock the signals that we were trapping before this function
+ * was called.
  */
-  switch(gl->timer.fn(gl, gl->timer.data)) {
-  default:
-  case GLTO_ABORT:
-    gl_record_status(gl, GLR_TIMEOUT, 0);
-    waserr = 1;
-    break;
-  case GLTO_REFRESH:
-    gl_queue_redisplay(gl);
-    break;
-  case GLTO_CONTINUE:
-    break;
-  };
-/*
- * If the callback function called gl_normal_io(), restore raw mode,
- * and queue a redisplay of the input line.
- */
-  if(!gl->raw_mode)
-    waserr = waserr || _gl_raw_io(gl, 1);
-/*
- * Disable conversion of newline characters to carriage-return/linefeed.
- */
-  attr.c_oflag &= ~(OPOST);
-  while(tcsetattr(gl->input_fd, TCSADRAIN, &attr)) {
-    if(errno != EINTR) {
-      _err_record_msg(gl->err, "tcsetattr error", END_ERR_MSG);
-      return 1;
-    };
+  if(sigprocmask(SIG_UNBLOCK, &gl->new_signal_set, NULL) == -1) {
+    fprintf(stderr, "getline(): sigprocmask error: %s\n", strerror(errno));
+    return 1;
   };
   return waserr;
 }
@@ -9222,45 +7692,30 @@ static int gl_call_timeout_handler(GetLine *gl)
  */
 int gl_group_history(GetLine *gl, unsigned id)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of this function */
 /*
  * Check the arguments.
  */
   if(!gl) {
-    errno = EINVAL;
+    fprintf(stderr, "gl_group_history: NULL argument(s).\n");
     return 1;
   };
 /*
- * Block all signals while we install the new configuration.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
  * If the group isn't being changed, do nothing.
  */
-  if(_glh_get_group(gl->glh) == id) {
-    status = 0;
+  if(_glh_get_group(gl->glh) == id)
+    return 0;
 /*
  * Establish the new group.
  */
-  } else if(_glh_set_group(gl->glh, id)) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-    status = 1;
+  if(_glh_set_group(gl->glh, id))
+    return 1;
 /*
  * Prevent history information from the previous group being
  * inappropriately used by the next call to gl_get_line().
  */
-  } else {
-    gl->preload_history = 0;
-    gl->last_search = -1;
-    status = 0;
-  };
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
+  gl->preload_history = 0;
+  gl->last_search = -1;
+  return 0;
 }
 
 /*.......................................................................
@@ -9295,34 +7750,14 @@ int gl_group_history(GetLine *gl, unsigned id)
 int gl_show_history(GetLine *gl, FILE *fp, const char *fmt, int all_groups,
 		    int max_lines)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of this function */
 /*
  * Check the arguments.
  */
   if(!gl || !fp || !fmt) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
+    fprintf(stderr, "gl_show_history: NULL argument(s).\n");
     return 1;
   };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Display the specified history group(s) while signals are blocked.
- */
-  status = _glh_show_history(gl->glh, _io_write_stdio, fp, fmt, all_groups, 
-			     max_lines) || fflush(fp)==EOF;
-  if(!status)
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
+  return _glh_show_history(gl->glh, fp, fmt, all_groups, max_lines);
 }
 
 /*.......................................................................
@@ -9339,32 +7774,7 @@ int gl_show_history(GetLine *gl, FILE *fp, const char *fmt, int all_groups,
  */
 GlTerminalSize gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline)
 {
-  GlTerminalSize size;  /* The object to be returned */
-  sigset_t oldset;      /* The signals that were blocked on entry */
-                        /*  to this function */
-/*
- * Block all signals while accessing gl.
- */
-  gl_mask_signals(gl, &oldset);
-/*
- * Lookup/configure the terminal size.
- */
-  _gl_terminal_size(gl, def_ncolumn, def_nline, &size);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return size;
-}
-
-/*.......................................................................
- * This is the private body of the gl_terminal_size() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
-			      GlTerminalSize *size)
-{
+  GlTerminalSize size;  /* The return value */
   const char *env;      /* The value of an environment variable */
   int n;                /* A number read from env[] */
 /*
@@ -9380,17 +7790,15 @@ static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
 /*
  * Ask the terminal directly if possible.
  */
-    gl_query_size(gl, &gl->ncolumn, &gl->nline);
+#ifdef USE_SIGWINCH
+    (void) gl_resize_terminal(gl, 0);
+#endif
 /*
- * If gl_query_size() couldn't ask the terminal, it will have
- * left gl->nrow and gl->ncolumn unchanged. If these values haven't
- * been changed from their initial values of zero, we need to find
- * a different method to get the terminal size.
- *
- * If the number of lines isn't known yet, first see if the
- * LINES environment ariable exists and specifies a believable number.
- * If this doesn't work, look up the default size in the terminal
- * information database.
+ * If gl_resize_terminal() couldn't be used, or it returned non-sensical
+ * values for the number of lines, see if the LINES environment variable
+ * exists and specifies a believable number. If this doesn't work,
+ * look up the default size in the terminal information database,
+ * where available.
  */
     if(gl->nline < 1) {
       if((env = getenv("LINES")) && (n=atoi(env)) > 0)
@@ -9404,10 +7812,11 @@ static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
 #endif
     };
 /*
- * If the number of lines isn't known yet, first see if the COLUMNS
- * environment ariable exists and specifies a believable number.  If
- * this doesn't work, look up the default size in the terminal
- * information database.
+ * If gl_resize_terminal() couldn't be used, or it returned non-sensical
+ * values for the number of columns, see if the COLUMNS environment variable
+ * exists and specifies a believable number. If this doesn't work, fall
+ * lookup the default size in the terminal information database,
+ * where available.
  */
     if(gl->ncolumn < 1) {
       if((env = getenv("COLUMNS")) && (n=atoi(env)) > 0)
@@ -9425,18 +7834,19 @@ static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
  * If we still haven't been able to acquire reasonable values, substitute
  * the default values specified by the caller.
  */
-  if(gl->nline <= 0)
+  if(gl->nline <= 1)
     gl->nline = def_nline;
-  if(gl->ncolumn <= 0)
-    gl->ncolumn = def_ncolumn;
+  /* MUST NOT set ncolumn to 1 or gl_output_char() might
+   * go into infinite recursion!
+   */
+  if(gl->ncolumn <= 1)
+    gl->ncolumn = def_ncolumn > 1 ? def_ncolumn : GL_DEF_NCOLUMN;
 /*
  * Copy the new size into the return value.
  */
-  if(size) {
-    size->nline = gl->nline;
-    size->ncolumn = gl->ncolumn;
-  };
-  return;
+  size.nline = gl->nline;
+  size.ncolumn = gl->ncolumn;
+  return size;
 }
 
 /*.......................................................................
@@ -9454,29 +7864,7 @@ static void _gl_terminal_size(GetLine *gl, int def_ncolumn, int def_nline,
  */
 int gl_resize_history(GetLine *gl, size_t bufsize)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of this function */
-/*
- * Check the arguments.
- */
-  if(!gl)
-    return 1;
-/*
- * Block all signals while modifying the contents of gl.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Perform the resize while signals are blocked.
- */
-  status = _glh_resize_history(gl->glh, bufsize);
-  if(status)
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
+  return gl ? _glh_resize_history(gl->glh, bufsize) : 1;
 }
 
 /*.......................................................................
@@ -9491,21 +7879,8 @@ int gl_resize_history(GetLine *gl, size_t bufsize)
  */
 void gl_limit_history(GetLine *gl, int max_lines)
 {
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Apply the limit while signals are blocked.
- */
+  if(gl)
     _glh_limit_history(gl->glh, max_lines);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9520,21 +7895,8 @@ void gl_limit_history(GetLine *gl, int max_lines)
  */
 void gl_clear_history(GetLine *gl, int all_groups)
 {
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Clear the history buffer while signals are blocked.
- */
+  if(gl)
     _glh_clear_history(gl->glh, all_groups);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9547,21 +7909,8 @@ void gl_clear_history(GetLine *gl, int all_groups)
  */
 void gl_toggle_history(GetLine *gl, int enable)
 {
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Change the history recording mode while signals are blocked.
- */
+  if(gl)
     _glh_toggle_history(gl->glh, enable);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9593,30 +7942,8 @@ void gl_toggle_history(GetLine *gl, int enable)
  */
 int gl_lookup_history(GetLine *gl, unsigned long id, GlHistoryLine *line)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of this function */
-/*
- * Check the arguments.
- */
-  if(!gl)
-    return 0;
-/*
- * Block all signals while modifying the contents of gl.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Perform the lookup while signals are blocked.
- */
-  status = _glh_lookup_history(gl->glh, (GlhLineID) id, &line->line,
-			       &line->group, &line->timestamp);
-  if(status)
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
+  return gl ? _glh_lookup_history(gl->glh, (GlhLineID) id, &line->line,
+				  &line->group, &line->timestamp) : 0;
 }
 
 /*.......................................................................
@@ -9631,22 +7958,9 @@ int gl_lookup_history(GetLine *gl, unsigned long id, GlHistoryLine *line)
  */
 void gl_state_of_history(GetLine *gl, GlHistoryState *state)
 {
-  if(gl && state) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Lookup the status while signals are blocked.
- */
+  if(gl && state)
     _glh_state_of_history(gl->glh, &state->enabled, &state->group,
 			  &state->max_lines);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9660,22 +7974,9 @@ void gl_state_of_history(GetLine *gl, GlHistoryState *state)
  */
 void gl_range_of_history(GetLine *gl, GlHistoryRange *range)
 {
-  if(gl && range) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Lookup the information while signals are blocked.
- */
+  if(gl && range)
     _glh_range_of_history(gl->glh, &range->oldest, &range->newest,
 			  &range->nlines);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9690,21 +7991,8 @@ void gl_range_of_history(GetLine *gl, GlHistoryRange *range)
  */
 void gl_size_of_history(GetLine *gl, GlHistorySize *size)
 {
-  if(gl && size) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Lookup the information while signals are blocked.
- */
+  if(gl && size)
     _glh_size_of_history(gl->glh, &size->size, &size->used);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
 }
 
 /*.......................................................................
@@ -9716,18 +8004,18 @@ static KT_KEY_FN(gl_list_history)
 /*
  * Start a new line.
  */
-  if(gl_start_newline(gl, 1))
+  if(fprintf(gl->output_fp, "\r\n") < 0)
     return 1;
 /*
  * List history lines that belong to the current group.
  */
-  _glh_show_history(gl->glh, gl_write_fn, gl, "%N  %T   %H\r\n", 0,
+  _glh_show_history(gl->glh, gl->output_fp, "%N  %T   %H\r\n", 0,
 		    count<=1 ? -1 : count);
 /*
- * Arrange for the input line to be redisplayed.
+ * Redisplay the line being edited.
  */
-  gl_queue_redisplay(gl);
-  return 0;
+  gl->term_curpos = 0;
+  return gl_redisplay(gl,1);
 }
 
 /*.......................................................................
@@ -9749,25 +8037,9 @@ static KT_KEY_FN(gl_list_history)
 int gl_echo_mode(GetLine *gl, int enable)
 {
   if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-    int was_echoing; /* The echoing disposition on entry to this function */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Install the new disposition while signals are blocked.
- */
-    was_echoing = gl->echo;
+    int was_echoing = gl->echo;
     if(enable >= 0)
       gl->echo = enable;
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-/*
- * Return the original echoing disposition.
- */
     return was_echoing;
   };
   return 1;
@@ -9796,18 +8068,14 @@ static int gl_display_prompt(GetLine *gl)
  * In case the screen got messed up, send a carriage return to
  * put the cursor at the beginning of the current terminal line.
  */
-  if(gl_print_control_sequence(gl, 1, gl->bol))
+  if(gl_output_control_sequence(gl, 1, gl->bol))
     return 1;
-/*
- * Mark the line as partially displayed.
- */
-  gl->displayed = 1;
 /*
  * Write the prompt, using the currently selected prompt style.
  */
   switch(gl->prompt_style) {
   case GL_LITERAL_PROMPT:
-    if(gl_print_string(gl, gl->prompt, '\0'))
+    if(gl_output_string(gl, gl->prompt, '\0'))
       return 1;
     break;
   case GL_FORMAT_PROMPT:
@@ -9879,7 +8147,7 @@ static int gl_display_prompt(GetLine *gl)
  * scratch.
  */
       if(old_attr & ~new_attr) {
-	if(gl_print_control_sequence(gl, 1, gl->text_attr_off))
+	if(gl_output_control_sequence(gl, 1, gl->text_attr_off))
 	  return 1;
 	old_attr = 0;
       };
@@ -9888,36 +8156,36 @@ static int gl_display_prompt(GetLine *gl)
  */
       if(new_attr != old_attr) {
 	if(new_attr & GL_TXT_BOLD && !(old_attr & GL_TXT_BOLD) &&
-	   gl_print_control_sequence(gl, 1, gl->bold))
+	   gl_output_control_sequence(gl, 1, gl->bold))
 	  return 1;
 	if(new_attr & GL_TXT_UNDERLINE && !(old_attr & GL_TXT_UNDERLINE) &&
-	   gl_print_control_sequence(gl, 1, gl->underline))
+	   gl_output_control_sequence(gl, 1, gl->underline))
 	  return 1;
 	if(new_attr & GL_TXT_STANDOUT && !(old_attr & GL_TXT_STANDOUT) &&
-	   gl_print_control_sequence(gl, 1, gl->standout))
+	   gl_output_control_sequence(gl, 1, gl->standout))
 	  return 1;
 	if(new_attr & GL_TXT_DIM && !(old_attr & GL_TXT_DIM) &&
-	   gl_print_control_sequence(gl, 1, gl->dim))
+	   gl_output_control_sequence(gl, 1, gl->dim))
 	  return 1;
 	if(new_attr & GL_TXT_REVERSE && !(old_attr & GL_TXT_REVERSE) &&
-	   gl_print_control_sequence(gl, 1, gl->reverse))
+	   gl_output_control_sequence(gl, 1, gl->reverse))
 	  return 1;
 	if(new_attr & GL_TXT_BLINK && !(old_attr & GL_TXT_BLINK) &&
-	   gl_print_control_sequence(gl, 1, gl->blink))
+	   gl_output_control_sequence(gl, 1, gl->blink))
 	  return 1;
 	old_attr = new_attr;
       };
 /*
  * Display the latest character.
  */
-      if(gl_print_char(gl, *pptr, pptr[1]))
+      if(gl_output_char(gl, *pptr, pptr[1]))
 	return 1;
     };
 /*
  * Turn off all text attributes now that we have finished drawing
  * the prompt.
  */
-    if(gl_print_control_sequence(gl, 1, gl->text_attr_off))
+    if(gl_output_control_sequence(gl, 1, gl->text_attr_off))
       return 1;
     break;
   };
@@ -9944,64 +8212,10 @@ static int gl_display_prompt(GetLine *gl)
 void gl_replace_prompt(GetLine *gl, const char *prompt)
 {
   if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Replace the prompt.
- */
-    _gl_replace_prompt(gl, prompt);
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
+    gl->prompt = prompt ? prompt : "";
+    gl->prompt_len = gl_displayed_prompt_width(gl);
+    gl->prompt_changed = 1;
   };
-}
-
-/*.......................................................................
- * This is the private body of the gl_replace_prompt() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static void _gl_replace_prompt(GetLine *gl, const char *prompt)
-{
-/*
- * Substitute an empty prompt?
- */
-  if(!prompt)
-    prompt = "";
-/*
- * Gaurd against aliasing between prompt and gl->prompt.
- */
-  if(gl->prompt != prompt) {
-/*
- * Get the length of the new prompt string.
- */
-    size_t slen = strlen(prompt);
-/*
- * If needed, allocate a new buffer for the prompt string.
- */
-    if(!gl->prompt || slen > strlen(gl->prompt)) {
-      size_t size = sizeof(char) * (slen + 1);
-      char *new_prompt = gl->prompt ? realloc(gl->prompt, size) : malloc(size);
-      if(!new_prompt)
-	return;
-      gl->prompt = new_prompt;
-    };
-/*
- * Make a copy of the new prompt.
- */
-    strcpy(gl->prompt, prompt);
-  };
-/*
- * Record the statistics of the new prompt.
- */
-  gl->prompt_len = gl_displayed_prompt_width(gl);
-  gl->prompt_changed = 1;
-  gl_queue_redisplay(gl);
-  return;
 }
 
 /*.......................................................................
@@ -10068,24 +8282,11 @@ static int gl_displayed_prompt_width(GetLine *gl)
 void gl_prompt_style(GetLine *gl, GlPromptStyle style)
 {
   if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Install the new style in gl while signals are blocked.
- */
     if(style != gl->prompt_style) {
       gl->prompt_style = style;
       gl->prompt_len = gl_displayed_prompt_width(gl);
       gl->prompt_changed = 1;
-      gl_queue_redisplay(gl);
     };
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
   };
 }
 
@@ -10109,52 +8310,13 @@ void gl_prompt_style(GetLine *gl, GlPromptStyle style)
 int gl_trap_signal(GetLine *gl, int signo, unsigned flags,
 		   GlAfterSignal after, int errno_value)
 {
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of this function */
+#ifndef __rtems__
+  GlSignalNode *sig;
 /*
  * Check the arguments.
  */
   if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals while modifying the contents of gl.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Perform the modification while signals are blocked.
- */
-  status = _gl_trap_signal(gl, signo, flags, after, errno_value);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_trap_signal() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_trap_signal(GetLine *gl, int signo, unsigned flags,
-			   GlAfterSignal after, int errno_value)
-{
-  GlSignalNode *sig;
-/*
- * Complain if an attempt is made to trap untrappable signals.
- * These would otherwise cause errors later in gl_mask_signals().
- */
-  if(0
-#ifdef SIGKILL
-     || signo==SIGKILL
-#endif
-#ifdef SIGBLOCK
-     || signo==SIGBLOCK
-#endif
-     ) {
+    fprintf(stderr, "gl_trap_signal: NULL argument(s).\n");
     return 1;
   };
 /*
@@ -10184,14 +8346,11 @@ static int _gl_trap_signal(GetLine *gl, int signo, unsigned flags,
  */
     sigemptyset(&sig->proc_mask);
     if(sigaddset(&sig->proc_mask, signo) == -1) {
-      _err_record_msg(gl->err, "sigaddset error", END_ERR_MSG);
+      fprintf(stderr, "gl_trap_signal: sigaddset error: %s\n",
+	      strerror(errno));
       sig = (GlSignalNode *) _del_FreeListNode(gl->sig_mem, sig);
       return 1;
     };
-/*
- * Add the signal to the bit-mask of signals being trapped.
- */
-    sigaddset(&gl->all_signal_set, signo);
   };
 /*
  * Record the new signal attributes.
@@ -10199,6 +8358,7 @@ static int _gl_trap_signal(GetLine *gl, int signo, unsigned flags,
   sig->flags = flags;
   sig->after = after;
   sig->errno_value = errno_value;
+#endif
   return 0;
 }
 
@@ -10216,20 +8376,13 @@ int gl_ignore_signal(GetLine *gl, int signo)
 {
   GlSignalNode *sig;  /* The gl->sigs list node of the specified signal */
   GlSignalNode *prev; /* The node that precedes sig in the list */
-  sigset_t oldset;    /* The signals that were blocked on entry to this */
-                      /*  function. */
 /*
  * Check the arguments.
  */
   if(!gl) {
-    errno = EINVAL;
+    fprintf(stderr, "gl_ignore_signal: NULL argument(s).\n");
     return 1;
   };
-/*
- * Block all signals while modifying the contents of gl.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
 /*
  * Find the node of the gl->sigs list which records the disposition
  * of the specified signal.
@@ -10249,15 +8402,7 @@ int gl_ignore_signal(GetLine *gl, int signo)
  * Return the node to the freelist.
  */
     sig = (GlSignalNode *) _del_FreeListNode(gl->sig_mem, sig);
-/*
- * Remove the signal from the bit-mask union of signals being trapped.
- */
-    sigdelset(&gl->all_signal_set, signo);
   };
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
   return 0;
 }
 
@@ -10271,53 +8416,42 @@ int gl_ignore_signal(GetLine *gl, int signo)
  *  gl           GetLine *  The resource object of gl_get_line().
  *  newline_char     int    The newline character to add to the end
  *                          of the line.
+ *  archive          int    True to have the line archived in the
+ *                          history buffer.
  * Output:
  *  return           int    0 - OK.
  *                          1 - Error.
  */
-static int gl_line_ended(GetLine *gl, int newline_char)
+static int gl_line_ended(GetLine *gl, int newline_char, int archive)
 {
 /*
- * If the newline character is printable, display it at the end of
- * the line, and add it to the input line buffer.
+ * If the newline character is printable, display it.
  */
   if(isprint((int)(unsigned char) newline_char)) {
-    if(gl_end_of_line(gl, 1, NULL) || gl_add_char_to_line(gl, newline_char))
+    if(gl_end_of_line(gl, 1) || gl_add_char_to_line(gl, newline_char))
       return 1;
   } else {
 /*
- * Otherwise just append a newline character to the input line buffer.
+ * Otherwise just append it to the input line buffer.
  */
-    newline_char = '\n';
-    gl_buffer_char(gl, newline_char, gl->ntotal);
+    gl->line[gl->ntotal++] = newline_char;
+    gl->line[gl->ntotal] = '\0';
   };
 /*
  * Add the line to the history buffer if it was entered with a
- * newline character.
+ * newline or carriage return character.
  */
-  if(gl->echo && gl->automatic_history && newline_char=='\n')
-    (void) _gl_append_history(gl, gl->line);
+  if(archive)
+    (void) _glh_add_history(gl->glh, gl->line, 0);
 /*
- * Except when depending on the system-provided line editing, start a new
+ * Unless depending on the system-provided line editing, start a new
  * line after the end of the line that has just been entered.
  */
-  if(gl->editor != GL_NO_EDITOR && gl_start_newline(gl, 1))
-    return 1;
-/*
- * Record the successful return status.
- */
-  gl_record_status(gl, GLR_NEWLINE, 0);
-/*
- * Attempt to flush any pending output.
- */
-  (void) gl_flush_output(gl);
-/*
- * The next call to gl_get_line() will write the prompt for a new line
- * (or continue the above flush if incomplete), so if we manage to
- * flush the terminal now, report that we are waiting to write to the
- * terminal.
- */
-  gl->pending_io = GLP_WRITE;
+  if(gl->editor != GL_NO_EDITOR) {
+    if(gl_end_of_line(gl, 1) ||
+       gl_output_raw_string(gl, "\r\n"))
+      return 1;
+  };
   return 0;
 }
 
@@ -10334,2511 +8468,7 @@ static int gl_line_ended(GetLine *gl, int newline_char)
  *                          call to gl_get_line(), or -1 if no signals
  *                          were caught.
  */
-int gl_last_signal(GetLine *gl)
+int gl_last_signal(const GetLine *gl)
 {
-  int signo = -1;   /* The requested signal number */
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Access gl now that signals are blocked.
- */    
-    signo = gl->last_signal;
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
-  return signo;
+  return gl ? gl->last_signal : -1;
 }
-
-/*.......................................................................
- * Prepare to edit a new line.
- *
- * Input:
- *  gl         GetLine *  The resource object of this library.
- *  prompt        char *  The prompt to prefix the line with, or NULL to
- *                        use the same prompt that was used by the previous
- *                        line.
- *  start_line    char *  The initial contents of the input line, or NULL
- *                        if it should start out empty.
- *  start_pos      int    If start_line isn't NULL, this specifies the
- *                        index of the character over which the cursor
- *                        should initially be positioned within the line.
- *                        If you just want it to follow the last character
- *                        of the line, send -1.
- * Output:
- *  return    int    0 - OK.
- *                   1 - Error.
- */
-static int gl_present_line(GetLine *gl, const char *prompt,
-			   const char *start_line, int start_pos)
-{
-/*
- * Prepare the line-editing properties for a new editing session.
- */
-  gl_reset_editor(gl);
-/*
- * Record the new prompt and its displayed width.
- */
-  if(prompt)
-    _gl_replace_prompt(gl, prompt);
-/*
- * Reset the history search pointers.
- */
-  if(_glh_cancel_search(gl->glh)) {
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-    return 1;
-  };
-/*
- * If the previous line was entered via the repeat-history action,
- * preload the specified history line.
- */
-  if(gl->preload_history) {
-    gl->preload_history = 0;
-    if(_glh_recall_line(gl->glh, gl->preload_id, gl->line, gl->linelen+1)) {
-      gl_update_buffer(gl);          /* Compute gl->ntotal etc.. */
-      gl->buff_curpos = gl->ntotal;
-    } else {
-      gl_truncate_buffer(gl, 0);
-    };
-    gl->preload_id = 0;
-/*
- * Present a specified initial line?
- */
-  } else if(start_line) {
-    char *cptr;      /* A pointer into gl->line[] */
-/*
- * Measure the length of the starting line.
- */
-    int start_len = strlen(start_line);
-/*
- * If the length of the line is greater than the available space,
- * truncate it.
- */
-    if(start_len > gl->linelen)
-      start_len = gl->linelen;
-/*
- * Load the line into the buffer.
- */
-    if(start_line != gl->line)
-      gl_buffer_string(gl, start_line, start_len, 0);
-/*
- * Strip off any trailing newline and carriage return characters.
- */
-    for(cptr=gl->line + gl->ntotal - 1; cptr >= gl->line &&
-	(*cptr=='\n' || *cptr=='\r'); cptr--,gl->ntotal--)
-      ;
-    gl_truncate_buffer(gl, gl->ntotal < 0 ? 0 : gl->ntotal);
-/*
- * Where should the cursor be placed within the line?
- */
-    if(start_pos < 0 || start_pos > gl->ntotal) {
-      if(gl_place_cursor(gl, gl->ntotal))
-	return 1;
-    } else {
-      if(gl_place_cursor(gl, start_pos))
-	return 1;
-    };
-/*
- * Clear the input line?
- */
-  } else {
-    gl_truncate_buffer(gl, 0);
-  };
-/*
- * Arrange for the line to be displayed by gl_flush_output().
- */
-  gl_queue_redisplay(gl);
-/*
- * Update the display.
- */
-  return gl_flush_output(gl);
-}
-
-/*.......................................................................
- * Reset all line-editing parameters for a new editing session. Note
- * that this does not empty the input line, since that would prevent a
- * gl_get_line() caller from specifying the returned line buffer as
- * the start_line argument of the next call to gl_get_line().
- *
- * Input:
- *  gl      GetLine *  The line editor resource object.
- */
-static void gl_reset_editor(GetLine *gl)
-{
-/*
- * Warning: Don't clear gl->line[] and gl->ntotal here (see above).
- */
-  gl->buff_curpos = 0;
-  gl->term_curpos = 0;
-  gl->term_len = 0;
-  gl->insert_curpos = 0;
-  gl->number = -1;
-  gl->displayed = 0;
-  gl->endline = 0;
-  gl->redisplay = 0;
-  gl->postpone = 0;
-  gl->nbuf = 0;
-  gl->nread = 0;
-  gl->vi.command = 0;
-  gl->vi.undo.line[0] = '\0';
-  gl->vi.undo.ntotal = 0;
-  gl->vi.undo.buff_curpos = 0;
-  gl->vi.repeat.action.fn = 0;
-  gl->vi.repeat.action.data = 0;
-  gl->last_signal = -1;
-}
-
-/*.......................................................................
- * Print an informational message to the terminal, after starting a new
- * line.
- *
- * Input:
- *  gl      GetLine *  The line editor resource object.
- *  ...  const char *  Zero or more strings to be printed.
- *  ...        void *  The last argument must always be GL_END_INFO.
- * Output:
- *  return      int    0 - OK.
- *                     1 - Error.
- */
-static int gl_print_info(GetLine *gl, ...)
-{
-  va_list ap;     /* The variable argument list */
-  const char *s;  /* The string being printed */
-  int waserr = 0; /* True after an error */
-/*
- * Only display output when echoing is on.
- */
-  if(gl->echo) {
-/*
- * Skip to the start of the next empty line before displaying the message.
- */
-    if(gl_start_newline(gl, 1))
-      return 1;
-/*
- * Display the list of provided messages.
- */
-    va_start(ap, gl);
-    while(!waserr && (s = va_arg(ap, const char *)) != GL_END_INFO)
-      waserr = gl_print_raw_string(gl, 1, s, -1);
-    va_end(ap);
-/*
- * Start a newline.
- */
-    waserr = waserr || gl_print_raw_string(gl, 1, "\n\r", -1);
-/*
- * Arrange for the input line to be redrawn.
- */
-    gl_queue_redisplay(gl);
-  };
-  return waserr;
-}
-
-/*.......................................................................
- * Go to the start of the next empty line, ready to output miscellaneous
- * text to the screen.
- *
- * Note that when async-signal safety is required, the 'buffered'
- * argument must be 0.
- *
- * Input:
- *  gl          GetLine *  The line editor resource object.
- *  buffered        int    If true, used buffered I/O when writing to
- *                         the terminal. Otherwise use async-signal-safe
- *                         unbuffered I/O.
- * Output:
- *  return          int    0 - OK.
- *                         1 - Error.
- */
-static int gl_start_newline(GetLine *gl, int buffered)
-{
-  int waserr = 0;  /* True after any I/O error */
-/*
- * Move the cursor to the start of the terminal line that follows the
- * last line of the partially enterred line. In order that this
- * function remain async-signal safe when write_fn is signal safe, we
- * can't call our normal output functions, since they call tputs(),
- * who's signal saftey isn't defined. Fortunately, we can simply use
- * \r and \n to move the cursor to the right place.
- */
-  if(gl->displayed) {   /* Is an input line currently displayed? */
-/*
- * On which terminal lines are the cursor and the last character of the
- * input line?
- */
-    int curs_line = gl->term_curpos / gl->ncolumn;
-    int last_line = gl->term_len / gl->ncolumn;
-/*
- * Move the cursor to the start of the line that follows the last
- * terminal line that is occupied by the input line.
- */
-    for( ; curs_line < last_line + 1; curs_line++)
-      waserr = waserr || gl_print_raw_string(gl, buffered, "\n", 1);
-    waserr = waserr || gl_print_raw_string(gl, buffered, "\r", 1);
-/*
- * Mark the line as no longer displayed.
- */
-    gl_line_erased(gl);
-  };
-  return waserr;
-}
-
-/*.......................................................................
- * The callback through which all terminal output is routed.
- * This simply appends characters to a queue buffer, which is
- * subsequently flushed to the output channel by gl_flush_output().
- *
- * Input:
- *  data     void *  The pointer to a GetLine line editor resource object
- *                   cast to (void *).
- *  s  const char *  The string to be written.
- *  n         int    The number of characters to write from s[].
- * Output:
- *  return    int    The number of characters written. This will always
- *                   be equal to 'n' unless an error occurs.
- */
-static GL_WRITE_FN(gl_write_fn)
-{
-  GetLine *gl = (GetLine *) data;
-  int ndone = _glq_append_chars(gl->cq, s, n, gl->flush_fn, gl);
-  if(ndone != n)
-    _err_record_msg(gl->err, _glq_last_error(gl->cq), END_ERR_MSG);
-  return ndone;
-}
-
-/*.......................................................................
- * Ask gl_get_line() what caused it to return.
- *
- * Input:
- *  gl             GetLine *  The line editor resource object.
- * Output:
- *  return  GlReturnStatus    The return status of the last call to
- *                            gl_get_line().
- */
-GlReturnStatus gl_return_status(GetLine *gl)
-{
-  GlReturnStatus rtn_status = GLR_ERROR;   /* The requested status */
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Access gl while signals are blocked.
- */    
-    rtn_status = gl->rtn_status;
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
-  return rtn_status;
-}
-
-/*.......................................................................
- * In non-blocking server-I/O mode, this function should be called
- * from the application's external event loop to see what type of
- * terminal I/O is being waited for by gl_get_line(), and thus what
- * direction of I/O to wait for with select() or poll().
- *
- * Input:
- *  gl          GetLine *  The resource object of gl_get_line().
- * Output:
- *  return  GlPendingIO    The type of pending I/O being waited for.
- */
-GlPendingIO gl_pending_io(GetLine *gl)
-{
-  GlPendingIO pending_io = GLP_WRITE;   /* The requested information */
-  if(gl) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Access gl while signals are blocked.
- */    
-    pending_io = gl->pending_io;
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  };
-  return pending_io;
-}
-
-/*.......................................................................
- * In server mode, this function configures the terminal for non-blocking
- * raw terminal I/O. In normal I/O mode it does nothing.
- *
- * Callers of this function must be careful to trap all signals that
- * terminate or suspend the program, and call gl_normal_io()
- * from the corresponding signal handlers in order to restore the
- * terminal to its original settings before the program is terminated
- * or suspended. They should also trap the SIGCONT signal to detect
- * when the program resumes, and ensure that its signal handler
- * call gl_raw_io() to redisplay the line and resume editing.
- *
- * This function is async signal safe.
- * 
- * Input:
- *  gl      GetLine *  The line editor resource object.
- * Output:
- *  return      int    0 - OK.
- *                     1 - Error.
- */
-int gl_raw_io(GetLine *gl)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_raw_io() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Don't allow applications to switch into raw mode unless in server mode.
- */
-  if(gl->io_mode != GL_SERVER_MODE) {
-    _err_record_msg(gl->err, "Can't switch to raw I/O unless in server mode",
-		    END_ERR_MSG);
-    errno = EPERM;
-    status = 1;
-  } else {
-/*
- * Execute the private body of the function while signals are blocked.
- */
-    status = _gl_raw_io(gl, 1);
-  };
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_raw_io().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- *
- * This function is async signal safe.
- */
-static int _gl_raw_io(GetLine *gl, int redisplay)
-{
-/*
- * If we are already in the correct mode, do nothing.
- */
-  if(gl->raw_mode)
-    return 0;
-/*
- * Switch the terminal to raw mode.
- */
-  if(gl->is_term && gl_raw_terminal_mode(gl))
-    return 1;
-/*
- * Switch to non-blocking I/O mode?
- */
-  if(gl->io_mode==GL_SERVER_MODE && 
-     (gl_nonblocking_io(gl, gl->input_fd) ||
-      gl_nonblocking_io(gl, gl->output_fd) ||
-      (gl->file_fp && gl_nonblocking_io(gl, fileno(gl->file_fp))))) {
-    if(gl->is_term)
-      gl_restore_terminal_attributes(gl);
-    return 1;
-  };
-/*
- * If an input line is being entered, arrange for it to be
- * displayed.
- */
-  if(redisplay) {
-    gl->postpone = 0;
-    gl_queue_redisplay(gl);
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Restore the terminal to the state that it had when
- * gl_raw_io() was last called. After calling
- * gl_raw_io(), this function must be called before
- * terminating or suspending the program, and before attempting other
- * uses of the terminal from within the program. See gl_raw_io()
- * for more details.
- *
- * Input:
- *  gl      GetLine *  The line editor resource object.
- * Output:
- *  return      int    0 - OK.
- *                     1 - Error.
- */
-int gl_normal_io(GetLine *gl)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_normal_io() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_normal_io(gl);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_normal_io().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_normal_io(GetLine *gl)
-{
-/*
- * If we are already in normal mode, do nothing.
- */
-  if(!gl->raw_mode)
-    return 0;
-/*
- * Postpone subsequent redisplays until after _gl_raw_io(gl, 1)
- * is next called.
- */
-  gl->postpone = 1;
-/*
- * Switch back to blocking I/O. Note that this is essential to do
- * here, because when using non-blocking I/O, the terminal output
- * buffering code can't always make room for new output without calling
- * malloc(), and a call to malloc() would mean that this function
- * couldn't safely be called from signal handlers.
- */
-  if(gl->io_mode==GL_SERVER_MODE &&
-     (gl_blocking_io(gl, gl->input_fd) ||
-      gl_blocking_io(gl, gl->output_fd) ||
-      (gl->file_fp && gl_blocking_io(gl, fileno(gl->file_fp)))))
-    return 1;
-/*
- * Move the cursor to the next empty terminal line. Note that
- * unbuffered I/O is requested, to ensure that gl_start_newline() be
- * async-signal-safe.
- */
-  if(gl->is_term && gl_start_newline(gl, 0))
-    return 1;
-/*
- * Switch the terminal to normal mode.
- */
-  if(gl->is_term && gl_restore_terminal_attributes(gl)) {
-/*
- * On error, revert to non-blocking I/O if needed, so that on failure
- * we remain in raw mode.
- */
-    if(gl->io_mode==GL_SERVER_MODE) {
-      gl_nonblocking_io(gl, gl->input_fd);
-      gl_nonblocking_io(gl, gl->output_fd);
-      if(gl->file_fp)
-	gl_nonblocking_io(gl, fileno(gl->file_fp));
-    };
-    return 1;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * This function allows you to install an additional completion
- * action, or to change the completion function of an existing
- * one. This should be called before the first call to gl_get_line()
- * so that the name of the action be defined before the user's
- * configuration file is read.
- *
- * Input:
- *  gl            GetLine *  The resource object of the command-line input
- *                           module.
- *  data             void *  This is passed to match_fn() whenever it is
- *                           called. It could, for example, point to a
- *                           symbol table that match_fn() would look up
- *                           matches in.
- *  match_fn   CplMatchFn *  The function that will identify the prefix
- *                           to be completed from the input line, and
- *                           report matching symbols.
- *  list_only         int    If non-zero, install an action that only lists
- *                           possible completions, rather than attempting
- *                           to perform the completion.
- *  name       const char *  The name with which users can refer to the
- *                           binding in tecla configuration files.
- *  keyseq     const char *  Either NULL, or a key sequence with which
- *                           to invoke the binding. This should be
- *                           specified in the same manner as key-sequences
- *                           in tecla configuration files (eg. "M-^I").
- * Output:
- *  return            int    0 - OK.
- *                           1 - Error.
- */
-int gl_completion_action(GetLine *gl, void *data, CplMatchFn *match_fn,
-			 int list_only, const char *name, const char *keyseq)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_completion_action() */
-/*
- * Check the arguments.
- */
-  if(!gl || !name || !match_fn) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Install the new action while signals are blocked.
- */
-  status = _gl_completion_action(gl, data, match_fn, list_only, name, keyseq);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_completion_action().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_completion_action(GetLine *gl, void *data, CplMatchFn *match_fn,
-				 int list_only, const char *name,
-				 const char *keyseq)
-{
-  KtKeyFn *current_fn;      /* An existing action function */
-  void *current_data;       /* The action-function callback data */
-/*
- * Which action function is desired?
- */
-  KtKeyFn *action_fn = list_only ? gl_list_completions : gl_complete_word;
-/*
- * Is there already an action of the specified name?
- */
-  if(_kt_lookup_action(gl->bindings, name, &current_fn, &current_data) == 0) {
-/*
- * If the action has the same type as the one being requested,
- * simply change the contents of its GlCplCallback callback data.
- */
-    if(current_fn == action_fn) {
-      GlCplCallback *cb = (GlCplCallback *) current_data;
-      cb->fn = match_fn;
-      cb->data = data;
-    } else {
-      errno = EINVAL;
-      _err_record_msg(gl->err,
-        "Illegal attempt to change the type of an existing completion action",
-        END_ERR_MSG);
-      return 1;
-    };
-/*
- * No existing action has the specified name.
- */
-  } else {
-/*
- * Allocate a new GlCplCallback callback object.
- */
-    GlCplCallback *cb = (GlCplCallback *) _new_FreeListNode(gl->cpl_mem);
-    if(!cb) {
-      errno = ENOMEM;
-      _err_record_msg(gl->err, "Insufficient memory to add completion action",
-		      END_ERR_MSG);
-      return 1;
-    };
-/*
- * Record the completion callback data.
- */
-    cb->fn = match_fn;
-    cb->data = data;
-/*
- * Attempt to register the new action.
- */
-    if(_kt_set_action(gl->bindings, name, action_fn, cb)) {
-      _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-      _del_FreeListNode(gl->cpl_mem, (void *) cb);
-      return 1;
-    };
-  };
-/*
- * Bind the action to a given key-sequence?
- */
-  if(keyseq && _kt_set_keybinding(gl->bindings, KTB_NORM, keyseq, name)) {
-    _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-    return 1;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Register an application-provided function as an action function.
- * This should preferably be called before the first call to gl_get_line()
- * so that the name of the action becomes defined before the user's
- * configuration file is read.
- *
- * Input:
- *  gl            GetLine *  The resource object of the command-line input
- *                           module.
- *  data             void *  Arbitrary application-specific callback
- *                           data to be passed to the callback
- *                           function, fn().
- *  fn         GlActionFn *  The application-specific function that
- *                           implements the action. This will be invoked
- *                           whenever the user presses any
- *                           key-sequence which is bound to this action.
- *  name       const char *  The name with which users can refer to the
- *                           binding in tecla configuration files.
- *  keyseq     const char *  The key sequence with which to invoke
- *                           the binding. This should be specified in the
- *                           same manner as key-sequences in tecla
- *                           configuration files (eg. "M-^I").
- * Output:
- *  return            int    0 - OK.
- *                           1 - Error.
- */
-int gl_register_action(GetLine *gl, void *data, GlActionFn *fn,
-                       const char *name, const char *keyseq)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_register_action() */
-/*
- * Check the arguments.
- */
-  if(!gl || !name || !fn) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Install the new action while signals are blocked.
- */
-  status = _gl_register_action(gl, data, fn, name, keyseq);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_register_action().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_register_action(GetLine *gl, void *data, GlActionFn *fn,
-			       const char *name, const char *keyseq)
-{
-  KtKeyFn *current_fn;      /* An existing action function */
-  void *current_data;       /* The action-function callback data */
-/*
- * Get the action function which actually runs the application-provided
- * function.
- */
-  KtKeyFn *action_fn = gl_run_external_action;
-/*
- * Is there already an action of the specified name?
- */
-  if(_kt_lookup_action(gl->bindings, name, &current_fn, &current_data) == 0) {
-/*
- * If the action has the same type as the one being requested,
- * simply change the contents of its GlCplCallback callback data.
- */
-    if(current_fn == action_fn) {
-      GlExternalAction *a = (GlExternalAction *) current_data;
-      a->fn = fn;
-      a->data = data;
-    } else {
-      errno = EINVAL;
-      _err_record_msg(gl->err,
-        "Illegal attempt to change the type of an existing action",
-		      END_ERR_MSG);
-      return 1;
-    };
-/*
- * No existing action has the specified name.
- */
-  } else {
-/*
- * Allocate a new GlCplCallback callback object.
- */
-    GlExternalAction *a =
-      (GlExternalAction *) _new_FreeListNode(gl->ext_act_mem);
-    if(!a) {
-      errno = ENOMEM;
-      _err_record_msg(gl->err, "Insufficient memory to add completion action",
-		      END_ERR_MSG);
-      return 1;
-    };
-/*
- * Record the completion callback data.
- */
-    a->fn = fn;
-    a->data = data;
-/*
- * Attempt to register the new action.
- */
-    if(_kt_set_action(gl->bindings, name, action_fn, a)) {
-      _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-      _del_FreeListNode(gl->cpl_mem, (void *) a);
-      return 1;
-    };
-  };
-/*
- * Bind the action to a given key-sequence?
- */
-  if(keyseq && _kt_set_keybinding(gl->bindings, KTB_NORM, keyseq, name)) {
-    _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-    return 1;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Invoke an action function previously registered by a call to
- * gl_register_action().
- */
-static KT_KEY_FN(gl_run_external_action)
-{
-  GlAfterAction status;  /* The return value of the action function */
-/*
- * Get the container of the action function and associated callback data.
- */
-  GlExternalAction *a = (GlExternalAction *) data;
-/*
- * Invoke the action function.
- */
-  status = a->fn(gl, a->data, count, gl->buff_curpos, gl->line);
-/*
- * If the callback took us out of raw (possibly non-blocking) input
- * mode, restore this mode, and queue a redisplay of the input line.
- */
-  if(_gl_raw_io(gl, 1))
-    return 1;
-/*
- * Finally, check to see what the action function wants us to do next.
- */
-  switch(status) {
-  default:
-  case GLA_ABORT:
-    gl_record_status(gl, GLR_ERROR, errno);
-    return 1;
-    break;
-  case GLA_RETURN:
-    return gl_newline(gl, 1, NULL);
-    break;
-  case GLA_CONTINUE:
-    break;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * In server-I/O mode the terminal is left in raw mode between calls
- * to gl_get_line(), so it is necessary for the application to install
- * terminal restoring signal handlers for signals that could terminate
- * or suspend the process, plus a terminal reconfiguration handler to
- * be called when a process resumption signal is received, and finally
- * a handler to be called when a terminal-resize signal is received.
- *
- * Since there are many signals that by default terminate or suspend
- * processes, and different systems support different sub-sets of
- * these signals, this function provides a convenient wrapper around
- * sigaction() for assigning the specified handlers to all appropriate
- * signals. It also arranges that when any one of these signals is
- * being handled, all other catchable signals are blocked. This is
- * necessary so that the specified signal handlers can safely call
- * gl_raw_io(), gl_normal_io() and gl_update_size() without
- * reentrancy issues.
- *
- * Input:
- *  term_handler  void (*)(int)  The signal handler to invoke when
- *                               a process-terminating signal is
- *                               received.
- *  susp_handler  void (*)(int)  The signal handler to invoke when
- *                               a process-suspending signal is
- *                               received.
- *  cont_handler  void (*)(int)  The signal handler to invoke when
- *                               a process-resumption signal is
- *                               received (ie. SIGCONT).
- *  size_handler  void (*)(int)  The signal handler to invoke when
- *                               a terminal-resize signal (ie. SIGWINCH)
- *                               is received.
- * Output:
- *  return                  int  0 - OK.
- *                               1 - Error.
- */
-int gl_tty_signals(void (*term_handler)(int), void (*susp_handler)(int),
-		   void (*cont_handler)(int), void (*size_handler)(int))
-{
-  int i;
-/*
- * Search for signals of the specified classes, and assign the
- * associated signal handler to them.
- */
-  for(i=0; i<sizeof(gl_signal_list)/sizeof(gl_signal_list[0]); i++) {
-    const struct GlDefSignal *sig = gl_signal_list + i;
-    if(sig->attr & GLSA_SUSP) {
-      if(gl_set_tty_signal(sig->signo, susp_handler))
-	return 1;
-    } else if(sig->attr & GLSA_TERM) {
-      if(gl_set_tty_signal(sig->signo, term_handler))
-	return 1;
-    } else if(sig->attr & GLSA_CONT) {
-      if(gl_set_tty_signal(sig->signo, cont_handler))
-	return 1;
-    } else if(sig->attr & GLSA_SIZE) {
-      if(gl_set_tty_signal(sig->signo, size_handler))
-	return 1;
-    };      
-  };
-  return 0;
-}
-
-/*.......................................................................
- * This is a private function of gl_tty_signals(). It installs a given
- * signal handler, and arranges that when that signal handler is being
- * invoked other signals are blocked. The latter is important to allow
- * functions like gl_normal_io(), gl_raw_io() and gl_update_size()
- * to be called from signal handlers.
- *
- * Input:
- *  signo     int           The signal to be trapped.
- *  handler  void (*)(int)  The signal handler to assign to the signal.
- */
-static int gl_set_tty_signal(int signo, void (*handler)(int))
-{
-  SigAction act;   /* The signal handler configuation */
-/*
- * Arrange to block all trappable signals except the one that is being
- * assigned (the trapped signal will be blocked automatically by the
- * system).
- */
-  gl_list_trappable_signals(&act.sa_mask);
-  sigdelset(&act.sa_mask, signo);
-/*
- * Assign the signal handler.
- */
-  act.sa_handler = handler;
-/*
- * There is only one portable signal handling flag, and it isn't
- * relevant to us, so don't specify any flags.
- */
-  act.sa_flags = 0;
-/*
- * Register the signal handler.
- */
-  if(sigaction(signo, &act, NULL))
-    return 1;
-  return 0;
-}
-
-/*.......................................................................
- * Display a left-justified string over multiple terminal lines,
- * taking account of the current width of the terminal. Optional
- * indentation and an optional prefix string can be specified to be
- * displayed at the start of each new terminal line used. Similarly,
- * an optional suffix can be specified to be displayed at the end of
- * each terminal line.  If needed, a single paragraph can be broken
- * across multiple calls.  Note that literal newlines in the input
- * string can be used to force a newline at any point and that you
- * should use this feature to explicitly end all paragraphs, including
- * at the end of the last string that you write. Note that when a new
- * line is started between two words that are separated by spaces,
- * those spaces are not output, whereas when a new line is started
- * because a newline character was found in the string, only the
- * spaces before the newline character are discarded.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- *  indentation    int    The number of spaces of indentation to write
- *                        at the beginning of each new terminal line.
- *  prefix  const char *  An optional prefix string to write after the
- *                        indentation margin at the start of each new
- *                        terminal line. You can specify NULL if no
- *                        prefix is required.
- *  suffix  const char *  An optional suffix string to draw at the end
- *                        of the terminal line. Spaces will be added
- *                        where necessary to ensure that the suffix ends
- *                        in the last column of the terminal line. If
- *                        no suffix is desired, specify NULL.
- *  fill_char      int    The padding character to use when indenting
- *                        the line or padding up to the suffix.
- *  def_width      int    If the terminal width isn't known, such as when
- *                        writing to a pipe or redirecting to a file,
- *                        this number specifies what width to assume.
- *  start          int    The number of characters already written to
- *                        the start of the current terminal line. This
- *                        is primarily used to allow individual
- *                        paragraphs to be written over multiple calls
- *                        to this function, but can also be used to
- *                        allow you to start the first line of a
- *                        paragraph with a different prefix or
- *                        indentation than those specified above.
- *  string  const char *  The string to be written.
- * Output:
- *  return         int    On error -1 is returned. Otherwise the
- *                        return value is the terminal column index at
- *                        which the cursor was left after writing the
- *                        final word in the string. Successful return
- *                        values can thus be passed verbatim to the
- *                        'start' arguments of subsequent calls to
- *                        gl_display_text() to allow the printing of a
- *                        paragraph to be broken across multiple calls
- *                        to gl_display_text().
- */
-int gl_display_text(GetLine *gl, int indentation, const char *prefix,
-		    const char *suffix, int fill_char,
-		    int def_width, int start, const char *string)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_completion_action() */
-/*
- * Check the arguments?
- */
-  if(!gl || !string) {
-    errno = EINVAL;
-    return -1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return -1;
-/*
- * Display the text while signals are blocked.
- */
-  status = _io_display_text(_io_write_stdio, gl->output_fp, indentation,
-			    prefix, suffix, fill_char,
-			    gl->ncolumn > 0 ? gl->ncolumn : def_width,
-			    start, string);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * Block all of the signals that we are currently trapping.
- *
- * Input:
- *  gl       GetLine *   The resource object of gl_get_line().
- * Input/Output:
- *  oldset   sigset_t *   The superseded process signal mask
- *                        will be return in *oldset unless oldset is
- *                        NULL.
- * Output:
- *  return        int     0 - OK.
- *                        1 - Error.
- */
-static int gl_mask_signals(GetLine *gl, sigset_t *oldset)
-{
-/*
- * Block all signals in all_signal_set, along with any others that are
- * already blocked by the application.
- */
-  if(sigprocmask(SIG_BLOCK, &gl->all_signal_set, oldset) >= 0) {
-    gl->signals_masked = 1;
-    return 0;
-  };
-/*
- * On error attempt to query the current process signal mask, so
- * that oldset be the correct process signal mask to restore later
- * if the caller of this function ignores the error return value.
- */
-  if(oldset)
-    (void) sigprocmask(SIG_SETMASK, NULL, oldset);
-  gl->signals_masked = 0;
-  return 1;
-}
-
-/*.......................................................................
- * Restore a process signal mask that was previously returned via the
- * oldset argument of gl_mask_signals().
- *
- * Input:
- *  gl        GetLine *   The resource object of gl_get_line().
- * Input/Output:
- *  oldset   sigset_t *   The process signal mask to be restored.
- * Output:
- *  return        int     0 - OK.
- *                        1 - Error.
- */
-static int gl_unmask_signals(GetLine *gl, sigset_t *oldset)
-{
-  gl->signals_masked = 0;
-  return sigprocmask(SIG_SETMASK, oldset, NULL) < 0;
-}
-
-/*.......................................................................
- * Arrange to temporarily catch the signals marked in gl->use_signal_set.
- *
- * Input:
- *  gl        GetLine *   The resource object of gl_get_line().
- * Output:
- *  return        int     0 - OK.
- *                        1 - Error.
- */
-static int gl_catch_signals(GetLine *gl)
-{
-  return sigprocmask(SIG_UNBLOCK, &gl->use_signal_set, NULL) < 0;
-}
-
-/*.......................................................................
- * Select the I/O mode to be used by gl_get_line().
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- *  mode      GlIOMode    The I/O mode to establish.
- * Output:
- *  return         int    0 - OK.
- *                        1 - Error.
- */
-int gl_io_mode(GetLine *gl, GlIOMode mode)
-{
-  sigset_t oldset; /* The signals that were blocked on entry to this function */
-  int status;      /* The return status of _gl_io_mode() */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Check that the requested mode is known.
- */
-  switch(mode) {
-  case GL_NORMAL_MODE:
-  case GL_SERVER_MODE:
-    break;
-  default:
-    errno = EINVAL;
-    _err_record_msg(gl->err, "Unknown gl_get_line() I/O mode requested.",
-		    END_ERR_MSG);
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Invoke the private body of this function.
- */
-  status = _gl_io_mode(gl, mode);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_io_mode().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_io_mode(GetLine *gl, GlIOMode mode)
-{
-/*
- * Are we already in the specified mode?
- */
-  if(mode == gl->io_mode)
-    return 0;
-/*
- * First revert to normal I/O in the current I/O mode.
- */
-  _gl_normal_io(gl);
-/*
- * Record the new mode.
- */
-  gl->io_mode = mode;
-/*
- * Perform any actions needed by the new mode.
- */
-  if(mode==GL_SERVER_MODE) {
-    if(_gl_raw_io(gl, 1))
-      return 1;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Return extra information (ie. in addition to that provided by errno)
- * about the last error to occur in either gl_get_line() or its
- * associated public functions.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- * Input/Output:
- *  buff          char *  An optional output buffer. Note that if the
- *                        calling application calls any gl_*()
- *                        functions from signal handlers, it should
- *                        provide a buffer here, so that a copy of
- *                        the latest error message can safely be made
- *                        while signals are blocked.
- *  n           size_t    The allocated size of buff[].
- * Output:
- *  return  const char *  A pointer to the error message. This will
- *                        be the buff argument, unless buff==NULL, in
- *                        which case it will be a pointer to an
- *                        internal error buffer. In the latter case,
- *                        note that the contents of the returned buffer
- *                        will change on subsequent calls to any gl_*()
- *                        functions.
- */
-const char *gl_error_message(GetLine *gl, char *buff, size_t n)
-{
-  if(!gl) {
-    static const char *msg = "NULL GetLine argument";
-    if(buff) {
-      strncpy(buff, msg, n);
-      buff[n-1] = '\0';
-    } else {
-      return msg;
-    };
-  } else if(buff) {
-    sigset_t oldset; /* The signals that were blocked on entry to this block */
-/*
- * Temporarily block all signals.
- */
-    gl_mask_signals(gl, &oldset);
-/*
- * Copy the error message into the specified buffer.
- */
-    if(buff && n > 0) {
-      strncpy(buff, _err_get_msg(gl->err), n);
-      buff[n-1] = '\0';
-    };
-/*
- * Restore the process signal mask before returning.
- */
-    gl_unmask_signals(gl, &oldset);
-  } else {
-    return _err_get_msg(gl->err);
-  };
-  return buff;
-}
-
-/*.......................................................................
- * Return the signal mask used by gl_get_line(). This is the set of
- * signals that gl_get_line() is currently configured to trap.
- *
- * Input:
- *  gl         GetLine *  The resource object of gl_get_line().
- * Input/Output:
- *  set       sigset_t *  The set of signals will be returned in *set,
- *                        in the form of a signal process mask, as
- *                        used by sigaction(), sigprocmask(),
- *                        sigpending(), sigsuspend(), sigsetjmp() and
- *                        other standard POSIX signal-aware
- *                        functions.
- * Output:
- *  return         int    0 - OK.
- *                        1 - Error (examine errno for reason).
- */
-int gl_list_signals(GetLine *gl, sigset_t *set)
-{
-/*
- * Check the arguments.
- */
-  if(!gl || !set) {
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Copy the signal mask into *set.
- */
-  memcpy(set, &gl->all_signal_set, sizeof(*set));
-  return 0;
-}
-
-/*.......................................................................
- * By default, gl_get_line() doesn't trap signals that are blocked
- * when it is called. This default can be changed either on a
- * per-signal basis by calling gl_trap_signal(), or on a global basis
- * by calling this function. What this function does is add the
- * GLS_UNBLOCK_SIG flag to all signals that are currently configured
- * to be trapped by gl_get_line(), such that when subsequent calls to
- * gl_get_line() wait for I/O, these signals are temporarily
- * unblocked. This behavior is useful in non-blocking server-I/O mode,
- * where it is used to avoid race conditions related to handling these
- * signals externally to gl_get_line(). See the demonstration code in
- * demo3.c, or the gl_handle_signal() man page for further
- * information.
- *
- * Input:
- *  gl         GetLine *   The resource object of gl_get_line().
- */
-void gl_catch_blocked(GetLine *gl)
-{
-  sigset_t oldset;    /* The process signal mask to restore */
-  GlSignalNode *sig;  /* A signal node in gl->sigs */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return;
-  };
-/*
- * Temporarily block all signals while we modify the contents of gl.
- */
-  gl_mask_signals(gl, &oldset);
-/*
- * Add the GLS_UNBLOCK_SIG flag to all configured signals.
- */
-  for(sig=gl->sigs; sig; sig=sig->next)
-    sig->flags |= GLS_UNBLOCK_SIG;
-/*
- * Restore the process signal mask that was superseded by the call
- * to gl_mask_signals().
- */
-  gl_unmask_signals(gl, &oldset);
-  return;
-}
-
-/*.......................................................................
- * Respond to signals who's default effects have important
- * consequences to gl_get_line(). This is intended for use in
- * non-blocking server mode, where the external event loop is
- * responsible for catching signals. Signals that are handled include
- * those that by default terminate or suspend the process, and the
- * signal that indicates that the terminal size has changed. Note that
- * this function is not signal safe and should thus not be called from
- * a signal handler itself. See the gl_io_mode() man page for how it
- * should be used.
- *
- * In the case of signals that by default terminate or suspend
- * processes, command-line editing will be suspended, the terminal
- * returned to a usable state, then the default disposition of the
- * signal restored and the signal resent, in order to suspend or
- * terminate the process.  If the process subsequently resumes,
- * command-line editing is resumed.
- *
- * In the case of signals that indicate that the terminal has been
- * resized, the new size will be queried, and any input line that is
- * being edited will be redrawn to fit the new dimensions of the
- * terminal.
- *
- * Input:
- *  signo    int    The number of the signal to respond to.
- *  gl   GetLine *  The first element of an array of 'ngl' GetLine
- *                  objects.
- *  ngl      int    The number of elements in the gl[] array. Normally
- *                  this will be one.
- */
-void gl_handle_signal(int signo, GetLine *gl, int ngl)
-{
-  int attr;             /* The attributes of the specified signal */
-  sigset_t all_signals; /* The set of trappable signals */
-  sigset_t oldset;      /* The process signal mask to restore */
-  int i;
-/*
- * NULL operation?
- */
-  if(ngl < 1 || !gl)
-    return;
-/*
- * Look up the default attributes of the specified signal.
- */
-  attr = gl_classify_signal(signo);
-/*
- * If the signal isn't known, we are done.
- */
-  if(!attr)
-    return;
-/*
- * Temporarily block all signals while we modify the gl objects.
- */
-  gl_list_trappable_signals(&all_signals);
-  sigprocmask(SIG_BLOCK, &all_signals, &oldset);
-/*
- * Suspend or terminate the process?
- */
-  if(attr & (GLSA_SUSP | GLSA_TERM)) {
-    gl_suspend_process(signo, gl, ngl);
-/*
- * Resize the terminal? Note that ioctl() isn't defined as being
- * signal safe, so we can't call gl_update_size() here. However,
- * gl_get_line() checks for resizes on each call, so simply arrange
- * for the application's event loop to call gl_get_line() as soon as
- * it becomes possible to write to the terminal. Note that if the
- * caller is calling select() or poll when this happens, these functions
- * get interrupted, since a signal has been caught.
- */
-  } else if(attr & GLSA_SIZE) {
-    for(i=0; i<ngl; i++)
-      gl[i].pending_io = GLP_WRITE;
-  };
-/*
- * Restore the process signal mask that was superseded by the call
- * to gl_mask_signals().
- */
-  sigprocmask(SIG_SETMASK, &oldset, NULL);
-  return;
-}
-
-/*.......................................................................
- * Respond to an externally caught process suspension or
- * termination signal.
- *
- * After restoring the terminal to a usable state, suspend or
- * terminate the calling process, using the original signal with its
- * default disposition restored to do so. If the process subsequently
- * resumes, resume editing any input lines that were being entered.
- *
- * Input:
- *  signo    int    The signal number to suspend the process with. Note
- *                  that the default disposition of this signal will be
- *                  restored before the signal is sent, so provided
- *                  that the default disposition of this signal is to
- *                  either suspend or terminate the application,
- *                  that is what wil happen, regardless of what signal
- *                  handler is currently assigned to this signal.
- *  gl   GetLine *  The first element of an array of 'ngl' GetLine objects
- *                  whose terminals should be restored to a sane state
- *                  while the application is suspended.
- *  ngl      int    The number of elements in the gl[] array.
- */
-static void gl_suspend_process(int signo, GetLine *gl, int ngl)
-{
-  sigset_t only_signo;          /* A signal set containing just signo */
-  sigset_t oldset;              /* The signal mask on entry to this function */
-  sigset_t all_signals;         /* A signal set containing all signals */
-  struct sigaction old_action;  /* The current signal handler */
-  struct sigaction def_action;  /* The default signal handler */
-  int i;
-/*
- * Create a signal mask containing the signal that was trapped.
- */
-  sigemptyset(&only_signo);
-  sigaddset(&only_signo, signo);
-/*
- * Temporarily block all signals.
- */
-  gl_list_trappable_signals(&all_signals);
-  sigprocmask(SIG_BLOCK, &all_signals, &oldset);
-/*
- * Restore the terminal to a usable state.
- */
-  for(i=0; i<ngl; i++) {
-    GetLine *obj = gl + i;
-    if(obj->raw_mode) {
-      _gl_normal_io(obj);
-      if(!obj->raw_mode)        /* Check that gl_normal_io() succeded */
-	obj->raw_mode = -1;     /* Flag raw mode as needing to be restored */
-    };
-  };
-/*
- * Restore the system default disposition of the signal that we
- * caught.  Note that this signal is currently blocked. Note that we
- * don't use memcpy() to copy signal sets here, because the signal safety
- * of memcpy() is undefined.
- */
-  def_action.sa_handler = SIG_DFL;
-  {
-    char *orig = (char *) &all_signals;
-    char *dest = (char *) &def_action.sa_mask;
-    for(i=0; i<sizeof(sigset_t); i++)
-      *dest++ = *orig++;
-  };
-  sigaction(signo, &def_action, &old_action);
-/*
- * Resend the signal, and unblock it so that it gets delivered to
- * the application. This will invoke the default action of this signal.
- */
-  raise(signo);
-  sigprocmask(SIG_UNBLOCK, &only_signo, NULL);
-/*
- * If the process resumes again, it will resume here.
- * Block the signal again, then restore our signal handler.
- */
-  sigprocmask(SIG_BLOCK, &only_signo, NULL);
-  sigaction(signo, &old_action, NULL);
-/*
- * Resume command-line editing.
- */
-  for(i=0; i<ngl; i++) {
-    GetLine *obj = gl + i;
-    if(obj->raw_mode == -1) { /* Did we flag the need to restore raw mode? */
-      obj->raw_mode = 0;      /* gl_raw_io() does nothing unless raw_mode==0 */
-      _gl_raw_io(obj, 1);
-    };
-  };
-/*
- * Restore the process signal mask to the way it was when this function
- * was called.
- */
-  sigprocmask(SIG_SETMASK, &oldset, NULL);
-  return;
-}
-
-/*.......................................................................
- * Return the information about the default attributes of a given signal.
- * The attributes that are returned are as defined by the standards that
- * created them, including POSIX, SVR4 and 4.3+BSD, and are taken from a
- * table in Richard Steven's book, "Advanced programming in the UNIX
- * environment".
- *
- * Input:
- *  signo        int   The signal to be characterized.
- * Output:
- *  return       int   A bitwise union of GlSigAttr enumerators, or 0
- *                     if the signal isn't known.
- */
-static int gl_classify_signal(int signo)
-{
-  int i;
-/*
- * Search for the specified signal in the gl_signal_list[] table.
- */
-  for(i=0; i<sizeof(gl_signal_list)/sizeof(gl_signal_list[0]); i++) {
-    const struct GlDefSignal *sig = gl_signal_list + i;
-    if(sig->signo == signo)
-      return sig->attr;
-  };
-/*
- * Signal not known.
- */
-  return 0;
-}
-
-/*.......................................................................
- * When in non-blocking server mode, this function can be used to abandon
- * the current incompletely entered input line, and prepare to start 
- * editing a new line on the next call to gl_get_line().
- *
- * Input:
- *  gl      GetLine *  The line editor resource object.
- */
-void gl_abandon_line(GetLine *gl)
-{
-  sigset_t oldset;    /* The process signal mask to restore */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return;
-  };
-/*
- * Temporarily block all signals while we modify the contents of gl.
- */
-  gl_mask_signals(gl, &oldset);
-/*
- * Mark the input line as discarded.
- */
-  _gl_abandon_line(gl);
-/*
- * Restore the process signal mask that was superseded by the call
- * to gl_mask_signals().
- */
-  gl_unmask_signals(gl, &oldset);
-  return;
-}
-
-/*.......................................................................
- * This is the private body of the gl_abandon_line() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-void _gl_abandon_line(GetLine *gl)
-{
-  gl->endline = 1;
-  gl->pending_io = GLP_WRITE;
-}
-
-/*.......................................................................
- * How many characters are needed to write a number as an octal string?
- *
- * Input:
- *  num   unsigned   The to be measured.
- * Output:
- *  return     int   The number of characters needed.
- */
-static int gl_octal_width(unsigned num)
-{
-  int n;    /* The number of characters needed to render the number */
-  for(n=1; num /= 8; n++)
-    ;
-  return n;
-}
-
-/*.......................................................................
- * Tell gl_get_line() the current terminal size. Note that this is only
- * necessary on systems where changes in terminal size aren't reported
- * via SIGWINCH.
- *
- * Input:
- *  gl            GetLine *  The resource object of gl_get_line().
- *  ncolumn           int    The number of columns in the terminal.
- *  nline             int    The number of lines in the terminal.
- * Output:
- *  return            int    0 - OK.
- *                           1 - Error.
- */
-int gl_set_term_size(GetLine *gl, int ncolumn, int nline)
-{
-  sigset_t oldset;      /* The signals that were blocked on entry */
-                        /*  to this function */
-  int status;           /* The return status */
-/*
- * Block all signals while accessing gl.
- */
-  gl_mask_signals(gl, &oldset);
-/*
- * Install the new terminal size.
- */
-  status = _gl_set_term_size(gl, ncolumn, nline);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the gl_set_term_size() function. It
- * assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_set_term_size(GetLine *gl, int ncolumn, int nline)
-{
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Reject non-sensical dimensions.
- */
-  if(ncolumn <= 0 || nline <= 0) {
-    _err_record_msg(gl->err, "Invalid terminal size", END_ERR_MSG);
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Install the new dimensions in the terminal driver if possible, so
- * that future calls to gl_query_size() get the new value.
- */
-#ifdef TIOCSWINSZ
-  if(gl->is_term) {
-    struct winsize size;
-    size.ws_row = nline;
-    size.ws_col = ncolumn;
-    size.ws_xpixel = 0;
-    size.ws_ypixel = 0;
-    if(ioctl(gl->output_fd, TIOCSWINSZ, &size) == -1) {
-      _err_record_msg(gl->err, "Can't change terminal size", END_ERR_MSG);
-      return 1;
-    };
-  };
-#endif
-/*
- * If an input line is in the process of being edited, redisplay it to
- * accomodate the new dimensions, and record the new dimensions in
- * gl->nline and gl->ncolumn.
- */
-  return gl_handle_tty_resize(gl, ncolumn, nline);
-}
-
-/*.......................................................................
- * Record a character in the input line buffer at a given position.
- *
- * Input:
- *  gl    GetLine *   The resource object of gl_get_line().
- *  c        char     The character to be recorded.
- *  bufpos    int     The index in the buffer at which to record the
- *                    character.
- * Output:
- *  return    int     0 - OK.
- *                    1 - Insufficient room.
- */
-static int gl_buffer_char(GetLine *gl, char c, int bufpos)
-{
-/*
- * Guard against buffer overruns.
- */
-  if(bufpos >= gl->linelen)
-    return 1;
-/*
- * Record the new character.
- */
-  gl->line[bufpos] = c;
-/*
- * If the new character was placed beyond the end of the current input
- * line, update gl->ntotal to reflect the increased number of characters
- * that are in gl->line, and terminate the string.
- */
-  if(bufpos >= gl->ntotal) {
-    gl->ntotal = bufpos+1;
-    gl->line[gl->ntotal] = '\0';
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Copy a given string into the input buffer, overwriting the current
- * contents.
- *
- * Input:
- *  gl    GetLine *   The resource object of gl_get_line().
- *  s  const char *   The string to be recorded.
- *  n         int     The number of characters to be copied from the
- *                    string.
- *  bufpos    int     The index in the buffer at which to place the
- *                    the first character of the string.
- * Output:
- *  return    int     0 - OK.
- *                    1 - String truncated to fit.
- */
-static int gl_buffer_string(GetLine *gl, const char *s, int n, int bufpos)
-{
-  int nnew;  /* The number of characters actually recorded */
-  int i;
-/*
- * How many of the characters will fit within the buffer?
- */
-  nnew = bufpos + n <= gl->linelen ? n : (gl->linelen - bufpos);
-/*
- * Record the first nnew characters of s[] in the buffer.
- */
-  for(i=0; i<nnew; i++)
-    gl_buffer_char(gl, s[i], bufpos + i);
-/*
- * Was the string truncated?
- */
-  return nnew < n;
-}
-
-/*.......................................................................
- * Make room in the input buffer for a string to be inserted. This
- * involves moving the characters that follow a specified point, towards
- * the end of the buffer.
- *
- * Input:
- *  gl    GetLine *   The resource object of gl_get_line().
- *  start     int     The index of the first character to be moved.
- *  n         int     The width of the gap.
- * Output:
- *  return    int     0 - OK.
- *                    1 - Insufficient room.
- */
-static int gl_make_gap_in_buffer(GetLine *gl, int start, int n)
-{
-/*
- * Ensure that the buffer has sufficient space.
- */
-  if(gl->ntotal + n > gl->linelen)
-    return 1;
-/*
- * Move everything including and beyond the character at 'start'
- * towards the end of the string.
- */
-  memmove(gl->line + start + n, gl->line + start, gl->ntotal - start + 1);
-/*
- * Update the recorded size of the line.
- */
-  gl->ntotal += n;
-  return 1;
-}
-
-/*.......................................................................
- * Remove a given number of characters from the input buffer. This
- * involves moving the characters that follow the removed characters to
- * where the removed sub-string started in the input buffer.
- *
- * Input:
- *  gl    GetLine *   The resource object of gl_get_line().
- *  start     int     The first character to be removed.
- *  n         int     The number of characters to remove.
- */
-static void gl_remove_from_buffer(GetLine *gl, int start, int n)
-{
-  memmove(gl->line + start, gl->line + start + n, gl->ntotal - start - n + 1);
-/*
- * Update the recorded size of the line.
- */
-  gl->ntotal -= n;
-}
-
-/*.......................................................................
- * Truncate the string in the input line buffer after a given number of
- * characters.
- *
- * Input:
- *  gl       GetLine *   The resource object of gl_get_line().
- *  n            int     The new length of the line.
- * Output:
- *  return       int     0 - OK.
- *                       1 - n > gl->linelen.
- */
-static int gl_truncate_buffer(GetLine *gl, int n)
-{
-  if(n > gl->linelen)
-    return 1;
-  gl->line[n] = '\0';
-  gl->ntotal = n;
-  return 0;
-}
-
-/*.......................................................................
- * When the contents of gl->line[] are changed without calling any of the
- * gl_ buffer manipulation functions, this function must be called to
- * compute the length of this string, and ancillary information.
- *
- * Input:
- *  gl      GetLine *   The resource object of gl_get_line().
- */
-static void gl_update_buffer(GetLine *gl)
-{
-  int len;  /* The length of the line */
-/*
- * Measure the length of the input line.
- */
-  for(len=0; len <= gl->linelen && gl->line[len]; len++)
-    ;
-/*
- * Just in case the string wasn't correctly terminated, do so here.
- */
-  gl->line[len] = '\0';
-/*
- * Record the number of characters that are now in gl->line[].
- */
-  gl->ntotal = len;
-/*
- * Ensure that the cursor stays within the bounds of the modified
- * input line.
- */
-  if(gl->buff_curpos > gl->ntotal)
-    gl->buff_curpos = gl->ntotal;
-/*
- * Arrange for the input line to be redrawn.
- */
-  gl_queue_redisplay(gl);
-  return;
-}
-
-/*.......................................................................
- * Erase the displayed input line, including its prompt, and leave the
- * cursor where the erased line started. Note that to allow this
- * function to be used when responding to a terminal resize, this
- * function is designed to work even if the horizontal cursor position
- * doesn't match the internally recorded position.
- *
- * Input:
- *  gl      GetLine *   The resource object of gl_get_line().
- * Output:
- *  return      int     0 - OK.
- *                      1 - Error.
- */
-static int gl_erase_line(GetLine *gl)
-{
-/*
- * Is a line currently displayed?
- */
-  if(gl->displayed) {
-/*
- * Relative the the start of the input line, which terminal line of
- * the current input line is the cursor currently on?
- */
-    int cursor_line = gl->term_curpos / gl->ncolumn;
-/*
- * Move the cursor to the start of the line.
- */
-    for( ; cursor_line > 0; cursor_line--) {
-      if(gl_print_control_sequence(gl, 1, gl->up))
-	return 1;
-    };
-    if(gl_print_control_sequence(gl, 1, gl->bol))
-      return 1;
-/*
- * Clear from the start of the line to the end of the terminal.
- */
-    if(gl_print_control_sequence(gl, gl->nline, gl->clear_eod))
-      return 1;
-/*
- * Mark the line as no longer displayed.
- */
-    gl_line_erased(gl);
-  };
-  return 0;
-}
-
-/*.......................................................................
- * Arrange for the input line to be redisplayed by gl_flush_output(),
- * as soon as the output queue becomes empty.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- */
-static void gl_queue_redisplay(GetLine *gl)
-{
-  gl->redisplay = 1;
-  gl->pending_io = GLP_WRITE;
-}
-
-/*.......................................................................
- * Truncate the displayed input line starting from the current
- * terminal cursor position, and leave the cursor at the end of the
- * truncated line. The input-line buffer is not affected.
- *
- * Input:
- *  gl     GetLine *   The resource object of gl_get_line().
- * Output:
- *  return     int     0 - OK.
- *                     1 - Error.
- */
-static int gl_truncate_display(GetLine *gl)
-{
-/*
- * Keep a record of the current terminal cursor position.
- */
-  int term_curpos = gl->term_curpos;
-/*
- * First clear from the cursor to the end of the current input line.
- */
-  if(gl_print_control_sequence(gl, 1, gl->clear_eol))
-    return 1;
-/*
- * If there is more than one line displayed, go to the start of the
- * next line and clear from there to the end of the display. Note that
- * we can't use clear_eod to do the whole job of clearing from the
- * current cursor position to the end of the terminal because
- * clear_eod is only defined when used at the start of a terminal line
- * (eg. with gnome terminals, clear_eod clears from the start of the
- * current terminal line, rather than from the current cursor
- * position).
- */
-  if(gl->term_len / gl->ncolumn > gl->term_curpos / gl->ncolumn) {
-    if(gl_print_control_sequence(gl, 1, gl->down) ||
-       gl_print_control_sequence(gl, 1, gl->bol) ||
-       gl_print_control_sequence(gl, gl->nline, gl->clear_eod))
-      return 1;
-/*
- * Where is the cursor now?
- */
-    gl->term_curpos = gl->ncolumn * (term_curpos / gl->ncolumn + 1);
-/*
- * Restore the cursor position.
- */
-    gl_set_term_curpos(gl, term_curpos);
-  };
-/*
- * Update the recorded position of the final character.
- */
-  gl->term_len = gl->term_curpos;
-  return 0;
-}
-
-/*.......................................................................
- * Return the set of all trappable signals.
- *
- * Input:
- *  signals   sigset_t *  The set of signals will be recorded in
- *                        *signals.
- */
-static void gl_list_trappable_signals(sigset_t *signals)
-{
-/*
- * Start with the set of all signals.
- */
-  sigfillset(signals);
-/*
- * Remove un-trappable signals from this set.
- */
-#ifdef SIGKILL
-  sigdelset(signals, SIGKILL);
-#endif
-#ifdef SIGSTOP
-  sigdelset(signals, SIGSTOP);
-#endif
-}
-
-/*.......................................................................
- * Read an input line from a non-interactive input stream.
- *
- * Input:
- *  gl     GetLine *   The resource object of gl_get_line().
- * Output:
- *  return     int     0 - OK
- *                     1 - Error.
- */
-static int gl_read_stream_line(GetLine *gl)
-{
-  char c = '\0'; /* The latest character read from fp */
-/*
- * Record the fact that we are about to read input.
- */
-  gl->pending_io = GLP_READ;
-/*
- * If we are starting a new line, reset the line-editing parameters,
- * and discard the previous input line.
- */
-  if(gl->endline) {
-    gl_reset_editor(gl);
-    gl_truncate_buffer(gl, 0);
-  };
-/*
- * Read one character at a time.
- */
-  while(gl->ntotal < gl->linelen && c != '\n') {
-/*
- * Attempt to read one more character.
- */
-    switch(gl_read_input(gl, &c)) {
-    case GL_READ_OK:
-      break;
-    case GL_READ_EOF:        /* Reached end-of-file? */
-/*
- * If any characters were read before the end-of-file condition,
- * interpolate a newline character, so that the caller sees a
- * properly terminated line. Otherwise return an end-of-file
- * condition.
- */
-      if(gl->ntotal > 0) {
-	c = '\n';
-      } else {
-	gl_record_status(gl, GLR_EOF, 0);
-	return 1;
-      };
-      break;
-    case GL_READ_BLOCKED:    /* Input blocked? */
-      gl_record_status(gl, GLR_BLOCKED, BLOCKED_ERRNO);
-      return 1;
-      break;
-    case GL_READ_ERROR:     /* I/O error? */
-      return 1;
-      break;
-    };
-/*
- * Append the character to the line buffer.
- */
-    if(gl_buffer_char(gl, c, gl->ntotal))
-      return 1;
-  };
-/*
- * Was the end of the input line reached before running out of buffer space?
- */
-  gl->endline = (c == '\n');
-  return 0;
-}
-
-/*.......................................................................
- * Read a single character from a non-interactive input stream.
- *
- * Input:
- *  gl     GetLine *   The resource object of gl_get_line().
- * Output:
- *  return     int     The character, or EOF on error.
- */
-static int gl_read_stream_char(GetLine *gl)
-{
-  char c = '\0';    /* The latest character read from fp */
-  int retval = EOF; /* The return value of this function */
-/*
- * Arrange to discard any incomplete input line.
- */
-  _gl_abandon_line(gl);
-/*
- * Record the fact that we are about to read input.
- */
-  gl->pending_io = GLP_READ;
-/*
- * Attempt to read one more character.
- */
-  switch(gl_read_input(gl, &c)) {
-  case GL_READ_OK:      /* Success */
-    retval = c;
-    break;
-  case GL_READ_BLOCKED: /* The read blocked */
-    gl_record_status(gl, GLR_BLOCKED, BLOCKED_ERRNO);
-    retval = EOF;  /* Failure */
-    break;
-  case GL_READ_EOF:     /* End of file reached */
-    gl_record_status(gl, GLR_EOF, 0);
-    retval = EOF;  /* Failure */
-    break;
-  case GL_READ_ERROR:
-    retval = EOF;  /* Failure */
-    break;
-  };
-  return retval;
-}
-
-/*.......................................................................
- * Bind a key sequence to a given action.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- *  origin  GlKeyOrigin     The originator of the key binding.
- *  key      const char *   The key-sequence to be bound (or unbound).
- *  action   const char *   The name of the action to bind the key to,
- *                          or either NULL or "" to unbind the
- *                          key-sequence.
- * Output:
- *  return          int     0 - OK
- *                          1 - Error.
- */
-int gl_bind_keyseq(GetLine *gl, GlKeyOrigin origin, const char *keyseq, 
-		   const char *action)
-{
-  KtBinder binder;  /* The private internal equivalent of 'origin' */
-/*
- * Check the arguments.
- */
-  if(!gl || !keyseq) {
-    errno = EINVAL;
-    if(gl)
-      _err_record_msg(gl->err, "NULL argument(s)", END_ERR_MSG);
-    return 1;
-  };
-/*
- * An empty action string requests that the key-sequence be unbound.
- * This is indicated to _kt_set_keybinding() by passing a NULL action
- * string, so convert an empty string to a NULL action pointer.
- */
-  if(action && *action=='\0')
-    action = NULL;
-/*
- * Translate the public originator enumeration to the private equivalent.
- */
-  binder = origin==GL_USER_KEY ? KTB_USER : KTB_NORM;
-/*
- * Bind the action to a given key-sequence?
- */
-  if(keyseq && _kt_set_keybinding(gl->bindings, binder, keyseq, action)) {
-    _err_record_msg(gl->err, _kt_last_error(gl->bindings), END_ERR_MSG);
-    return 1;
-  };
-  return 0;
-}
-
-/*.......................................................................
- * This is the public wrapper around the gl_clear_termina() function.
- * It clears the terminal and leaves the cursor at the home position.
- * In server I/O mode, the next call to gl_get_line() will also
- * redisplay the current input line.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- * Output:
- *  return          int     0 - OK.
- *                          1 - Error.
- */
-int gl_erase_terminal(GetLine *gl)
-{
-  sigset_t oldset;      /* The signals that were blocked on entry */
-                        /*  to this function */
-  int status;           /* The return status */
-/*
- * Block all signals while accessing gl.
- */
-  gl_mask_signals(gl, &oldset);
-/*
- * Clear the terminal.
- */
-  status = gl_clear_screen(gl, 1, NULL);
-/*
- * Attempt to flush the clear-screen control codes to the terminal.
- * If this doesn't complete the job, the next call to gl_get_line()
- * will.
- */
-  (void) gl_flush_output(gl);
-/*
- * Restore the process signal mask before returning.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This function must be called by any function that erases the input
- * line.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- */
-static void gl_line_erased(GetLine *gl)
-{
-  gl->displayed = 0;
-  gl->term_curpos = 0;
-  gl->term_len = 0;
-}
-
-/*.......................................................................
- * Append a specified line to the history list.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- *  line     const char *   The line to be added.
- * Output:
- *  return          int     0 - OK.
- *                          1 - Error.
- */
-int gl_append_history(GetLine *gl, const char *line)
-{
-  sigset_t oldset;      /* The signals that were blocked on entry */
-                        /*  to this function */
-  int status;           /* The return status */
-/*
- * Check the arguments.
- */
-  if(!gl || !line) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  status = _gl_append_history(gl, line);
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return status;
-}
-
-/*.......................................................................
- * This is the private body of the public function, gl_append_history().
- * It assumes that the caller has checked its arguments and blocked the
- * delivery of signals.
- */
-static int _gl_append_history(GetLine *gl, const char *line)
-{
-  int status =_glh_add_history(gl->glh, line, 0);
-  if(status)
-    _err_record_msg(gl->err, _glh_last_error(gl->glh), END_ERR_MSG);
-  return status;
-}
-
-/*.......................................................................
- * Enable or disable the automatic addition of newly entered lines to the
- * history list.
- *
- * Input:
- *  gl          GetLine *   The resource object of gl_get_line().
- *  enable          int     If true, subsequently entered lines will
- *                          automatically be added to the history list
- *                          before they are returned to the caller of
- *                          gl_get_line(). If 0, the choice of how and
- *                          when to archive lines in the history list,
- *                          is left up to the calling application, which
- *                          can do so via calls to gl_append_history().
- * Output:
- *  return          int     0 - OK.
- *                          1 - Error.
- */
-int gl_automatic_history(GetLine *gl, int enable)
-{
-  sigset_t oldset;      /* The signals that were blocked on entry */
-                        /*  to this function */
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return 1;
-  };
-/*
- * Block all signals.
- */
-  if(gl_mask_signals(gl, &oldset))
-    return 1;
-/*
- * Execute the private body of the function while signals are blocked.
- */
-  gl->automatic_history = enable;
-/*
- * Restore the process signal mask.
- */
-  gl_unmask_signals(gl, &oldset);
-  return 0;
-}
-
-/*.......................................................................
- * This is a public function that reads a single uninterpretted
- * character from the user, without displaying anything.
- *
- * Input:
- *  gl     GetLine *  A resource object previously returned by
- *                    new_GetLine().
- * Output:
- *  return     int    The character that was read, or EOF if the read
- *                    had to be aborted (in which case you can call
- *                    gl_return_status() to find out why).
- */
-int gl_read_char(GetLine *gl)
-{
-  int retval;   /* The return value of _gl_read_char() */
-/*
- * This function can be called from application callback functions,
- * so check whether signals have already been masked, so that we don't
- * do it again, and overwrite gl->old_signal_set.
- */
-  int was_masked = gl->signals_masked;
-/*
- * Check the arguments.
- */
-  if(!gl) {
-    errno = EINVAL;
-    return EOF;
-  };
-/*
- * Temporarily block all of the signals that we have been asked to trap.
- */
-  if(!was_masked && gl_mask_signals(gl, &gl->old_signal_set))
-    return EOF;
-/*
- * Perform the character reading task.
- */
-  retval = _gl_read_char(gl);
-/*
- * Restore the process signal mask to how it was when this function was
- * first called.
- */
-  if(!was_masked)
-    gl_unmask_signals(gl, &gl->old_signal_set);
-  return retval;
-}
-
-/*.......................................................................
- * This is the main body of the public function gl_read_char().
- */
-static int _gl_read_char(GetLine *gl)
-{
-  int retval = EOF;  /* The return value */
-  int waserr = 0;    /* True if an error occurs */
-  char c;            /* The character read */
-/*
- * This function can be called from application callback functions,
- * so check whether signals have already been overriden, so that we don't
- * overwrite the preserved signal handlers with gl_get_line()s. Also
- * record whether we are currently in raw I/O mode or not, so that this
- * can be left in the same state on leaving this function.
- */
-  int was_overriden = gl->signals_overriden;
-  int was_raw = gl->raw_mode;
-/*
- * Also keep a record of the direction of any I/O that gl_get_line()
- * is awaiting, so that we can restore this status on return.
- */
-  GlPendingIO old_pending_io = gl->pending_io;
-/*
- * Assume that this call will successfully complete the input operation
- * until proven otherwise.
- */
-  gl_clear_status(gl);
-/*
- * If this is the first call to this function or gl_get_line(),
- * since new_GetLine(), complete any postponed configuration.
- */
-  if(!gl->configured) {
-    (void) _gl_configure_getline(gl, NULL, NULL, TECLA_CONFIG_FILE);
-    gl->configured = 1;
-  };
-/*
- * Before installing our signal handler functions, record the fact
- * that there are no pending signals.
- */
-  gl_pending_signal = -1;
-/*
- * Temporarily override the signal handlers of the calling program,
- * so that we can intercept signals that would leave the terminal
- * in a bad state.
- */
-  if(!was_overriden)
-    waserr = gl_override_signal_handlers(gl);
-/*
- * After recording the current terminal settings, switch the terminal
- * into raw input mode, without redisplaying any partially entered input
- * line.
- */
-  if(!was_raw)
-    waserr = waserr || _gl_raw_io(gl, 0);
-/*
- * Attempt to read the line. This will require more than one attempt if
- * either a current temporary input file is opened by gl_get_input_line()
- * or the end of a temporary input file is reached by gl_read_stream_line().
- */
-  while(!waserr) {
-/*
- * Read a line from a non-interactive stream?
- */
-    if(gl->file_fp || !gl->is_term) {
-      retval = gl_read_stream_char(gl);
-      if(retval != EOF) {            /* Success? */
-	break;
-      } else if(gl->file_fp) {  /* End of temporary input file? */
-	gl_revert_input(gl);
-	gl_record_status(gl, GLR_NEWLINE, 0);
-      } else {                  /* An error? */
-	waserr = 1;
-	break;
-      };
-    };
-/*
- * Read from the terminal? Note that the above if() block may have
- * changed gl->file_fp, so it is necessary to retest it here, rather
- * than using an else statement.
- */
-    if(!gl->file_fp && gl->is_term) {
-/*
- * Flush any pending output to the terminal before waiting
- * for the user to type a character.
- */
-      if(_glq_char_count(gl->cq) > 0 && gl_flush_output(gl)) {
-	retval = EOF;
-/*
- * Read one character. Don't append it to the key buffer, since
- * this would subseuqnely appear as bogus input to the line editor.
- */
-      } else if(gl_read_terminal(gl, 0, &c) == 0) {
-/*
- * Record the character for return.
- */
-	retval = c;
-/*
- * In this mode, count each character as being a new key-sequence.
- */
-	gl->keyseq_count++;
-/*
- * Delete the character that was read, from the key-press buffer.
- */
-	gl_discard_chars(gl, 1);
-      };
-      if(retval==EOF)
-	waserr = 1;
-      else
-	break;
-    };
-  };
-/*
- * If an error occurred, but gl->rtn_status is still set to
- * GLR_NEWLINE, change the status to GLR_ERROR. Otherwise
- * leave it at whatever specific value was assigned by the function
- * that aborted input. This means that only functions that trap
- * non-generic errors have to remember to update gl->rtn_status
- * themselves.
- */
-  if(waserr && gl->rtn_status == GLR_NEWLINE)
-    gl_record_status(gl, GLR_ERROR, errno);
-/*
- * Restore terminal settings, if they were changed by this function.
- */
-  if(!was_raw && gl->io_mode != GL_SERVER_MODE)
-    _gl_normal_io(gl);
-/*
- * Restore the signal handlers, if they were overriden by this function.
- */
-  if(!was_overriden)
-    gl_restore_signal_handlers(gl);
-/*
- * If this function gets aborted early, the errno value associated
- * with the event that caused this to happen is recorded in
- * gl->rtn_errno. Since errno may have been overwritten by cleanup
- * functions after this, restore its value to the value that it had
- * when the error condition occured, so that the caller can examine it
- * to find out what happened.
- */
-  errno = gl->rtn_errno;
-/*
- * Error conditions are signalled to the caller, by setting the returned
- * character to EOF.
- */
-  if(gl->rtn_status != GLR_NEWLINE)
-    retval = EOF;
-/*
- * Restore the indication of what direction of I/O gl_get_line()
- * was awaiting before this call.
- */
-  gl->pending_io = old_pending_io;
-/*
- * Return the acquired character.
- */
-  return retval;
-}
-
-/*.......................................................................
- * Reset the GetLine completion status. This function should be called
- * at the start of gl_get_line(), gl_read_char() and gl_query_char()
- * to discard the completion status and non-zero errno value of any
- * preceding calls to these functions.
- *
- * Input:
- *  gl       GetLine *  The resource object of this module.
- */
-static void gl_clear_status(GetLine *gl)
-{
-  gl_record_status(gl, GLR_NEWLINE, 0);
-}
-
-/*.......................................................................
- * When an error or other event causes gl_get_line() to return, this
- * function should be called to record information about what
- * happened, including the value of errno and the value that
- * gl_return_status() should return.
- *
- * Input:
- *  gl                GetLine *  The resource object of this module.
- *  rtn_status GlReturnStatus    The completion status. To clear a
- *                               previous abnormal completion status,
- *                               specify GLR_NEWLINE (this is what
- *                               gl_clear_status() does).
- *  rtn_errno             int    The associated value of errno.
- */
-static void gl_record_status(GetLine *gl, GlReturnStatus rtn_status,
-			     int rtn_errno)
-{
-/*
- * If rtn_status==GLR_NEWLINE, then this resets the completion status, so we
- * should always heed this. Otherwise, only record the first abnormal
- * condition that occurs after such a reset.
- */
-  if(rtn_status == GLR_NEWLINE || gl->rtn_status == GLR_NEWLINE) {
-    gl->rtn_status = rtn_status;
-    gl->rtn_errno = rtn_errno;
-  };
-}
-

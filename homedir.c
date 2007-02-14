@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -29,12 +29,6 @@
  * of the copyright holder.
  */
 
-/*
- * If file-system access is to be excluded, this module has no function,
- * so all of its code should be excluded.
- */
-#ifndef WITHOUT_FILE_SYSTEM
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,21 +41,20 @@
 
 #include "pathutil.h"
 #include "homedir.h"
-#include "errmsg.h"
+
+/*
+ * Set the max length of the error-reporting string. There is no point
+ * in this being longer than the width of a typical terminal window.
+ * In composing error messages, I have assumed that this number is
+ * at least 80, so you don't decrease it below this number.
+ */
+#define ERRLEN 200
 
 /*
  * Use the reentrant POSIX threads versions of the password lookup functions?
  */
-#if defined(PREFER_REENTRANT) && defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
+#if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
 #define THREAD_COMPATIBLE 1
-/*
- * Under Solaris we can use thr_main() to determine whether
- * threads are actually running, and thus when it is necessary
- * to avoid non-reentrant features.
- */
-#if defined __sun && defined __SVR4
-#include <thread.h>                      /* Solaris thr_main() */
-#endif
 #endif
 
 /*
@@ -75,12 +68,12 @@
  * maintained in objects of the following type.
  */
 struct HomeDir {
-  ErrMsg *err;             /* The error message report buffer */
-  char *buffer;            /* A buffer for reading password entries and */
-                           /*  directory paths. */
-  int buflen;              /* The allocated size of buffer[] */
+  char errmsg[ERRLEN+1]; /* Error-report buffer */
+  char *buffer;          /* A buffer for reading password entries and */
+                         /*  directory paths. */
+  int buflen;            /* The allocated size of buffer[] */
 #ifdef THREAD_COMPATIBLE
-  struct passwd pwd;       /* The password entry of a user */
+  struct passwd pwd;     /* The password entry of a user */
 #endif
 };
 
@@ -101,7 +94,7 @@ HomeDir *_new_HomeDir(void)
  */
   home = (HomeDir *) malloc(sizeof(HomeDir));
   if(!home) {
-    errno = ENOMEM;
+    fprintf(stderr, "_new_HomeDir: Insufficient memory.\n");
     return NULL;
   };
 /*
@@ -109,15 +102,9 @@ HomeDir *_new_HomeDir(void)
  * container at least up to the point at which it can safely be passed
  * to _del_HomeDir().
  */
-  home->err = NULL;
+  home->errmsg[0] = '\0';
   home->buffer = NULL;
   home->buflen = 0;
-/*
- * Allocate a place to record error messages.
- */
-  home->err = _new_ErrMsg();
-  if(!home->err)
-    return _del_HomeDir(home);
 /*
  * Allocate the buffer that is used by the reentrant POSIX password-entry
  * lookup functions.
@@ -127,7 +114,7 @@ HomeDir *_new_HomeDir(void)
  * Get the length of the buffer needed by the reentrant version
  * of getpwnam().
  */
-#ifndef _SC_GETPW_R_SIZE_MAX
+#if ! defined(_SC_GETPW_R_SIZE_MAX) || defined(__rtems__)
   home->buflen = DEF_GETPW_R_SIZE_MAX;
 #else
   errno = 0;
@@ -151,7 +138,7 @@ HomeDir *_new_HomeDir(void)
  */
   home->buffer = (char *) malloc(home->buflen);
   if(!home->buffer) {
-    errno = ENOMEM;
+    fprintf(stderr, "_new_HomeDir: Insufficient memory.");
     return _del_HomeDir(home);
   };
   return home;
@@ -168,7 +155,6 @@ HomeDir *_new_HomeDir(void)
 HomeDir *_del_HomeDir(HomeDir *home)
 {
   if(home) {
-    home->err = _del_ErrMsg(home->err);
     if(home->buffer)
       free(home->buffer);
     free(home);
@@ -214,30 +200,21 @@ const char *_hd_lookup_home_dir(HomeDir *home, const char *user)
  * Check the arguments.
  */
   if(!home) {
-    errno = EINVAL;
+    fprintf(stderr, "_hd_lookup_home_dir: NULL argument(s).\n");
     return NULL;
   };
 /*
  * Handle the ksh "~+". This expands to the absolute path of the
  * current working directory.
  */
-  if(!login_user && strcmp(user, "+") == 0) {
+  if (!login_user && strcmp(user, "+") == 0) {
     home_dir = hd_getpwd(home);
     if(!home_dir) {
-      _err_record_msg(home->err, "Can't determine current directory",
-		      END_ERR_MSG);
+      strncpy(home->errmsg, "Cannot determine current directory.", ERRLEN);
+      home->errmsg[ERRLEN] = '\0';
       return NULL;
     }
     return home_dir;
-  };
-/*
- * When looking up the home directory of the current user, see if the
- * HOME environment variable is set, and if so, return its value.
- */
-  if(login_user) {
-    home_dir = getenv("HOME");
-    if(home_dir)
-      return home_dir;
   };
 /*
  * Look up the password entry of the user.
@@ -256,8 +233,8 @@ const char *_hd_lookup_home_dir(HomeDir *home, const char *user)
     else
       status = getpwnam_r(user, &home->pwd, home->buffer, home->buflen, &ret);
     if(status || !ret) {
-      _err_record_msg(home->err, "User '", user, "' doesn't exist.",
-		      END_ERR_MSG);
+      const char *fmt = "User '%.*s' doesn't exist.";
+      sprintf(home->errmsg, fmt, ERRLEN - strlen(fmt),  user);
       return NULL;
     };
 /*
@@ -272,8 +249,8 @@ const char *_hd_lookup_home_dir(HomeDir *home, const char *user)
   {
     struct passwd *pwd = login_user ? getpwuid(geteuid()) : getpwnam(user);
     if(!pwd) {
-      _err_record_msg(home->err, "User '", user, "' doesn't exist.",
-		      END_ERR_MSG);
+      const char *fmt = "User '%.*s' doesn't exist.";
+      sprintf(home->errmsg, fmt, ERRLEN - strlen(fmt),  user);
       return NULL;
     };
 /*
@@ -296,7 +273,7 @@ const char *_hd_lookup_home_dir(HomeDir *home, const char *user)
  */
 const char *_hd_last_home_dir_error(HomeDir *home)
 {
-  return home ? _err_get_msg(home->err) : "NULL HomeDir argument";
+  return home ? home->errmsg : "NULL HomeDir argument";
 }
 
 /*.......................................................................
@@ -307,10 +284,6 @@ const char *_hd_last_home_dir_error(HomeDir *home)
  * Input:
  *  home             HomeDir *  The resource object for reading home
  *                              directories.
- *  prefix        const char *  Only information for usernames that
- *                              start with this prefix will be
- *                              returned. Note that the empty
- &                              string "", matches all usernames.
  *  data                void *  Anonymous data to be passed to the
  *                              callback function.
  *  callback_fn  HOME_DIR_FN(*) The function to call for each user.
@@ -320,64 +293,24 @@ const char *_hd_last_home_dir_error(HomeDir *home)
  *                                  of the error can be obtained by
  *                                  calling _hd_last_home_dir_error().
  */
-int _hd_scan_user_home_dirs(HomeDir *home, const char *prefix,
-			    void *data, HOME_DIR_FN(*callback_fn))
+int _hd_scan_user_home_dirs(HomeDir *home, void *data, HOME_DIR_FN(*callback_fn))
 {
   int waserr = 0;       /* True after errors */
-  int prefix_len;       /* The length of prefix[] */
 /*
  * Check the arguments.
  */
-  if(!home || !prefix || !callback_fn) {
-    if(home) {
-      _err_record_msg(home->err,
-		      "_hd_scan_user_home_dirs: Missing callback function",
-		      END_ERR_MSG);
-    };
+  if(!home || !callback_fn) {
+    if(home)
+      strcpy(home->errmsg,
+	     "_hd_scan_user_home_dirs: Missing callback function");
     return 1;
   };
-/*
- * Get the length of the username prefix.
- */
-  prefix_len = strlen(prefix);
 /*
  * There are no reentrant versions of getpwent() etc for scanning
  * the password file, so disable username completion when the
  * library is compiled to be reentrant.
  */
-#if defined(PREFER_REENTRANT) && defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
-#if defined __sun && defined __SVR4
-  if(thr_main() >= 0) /* thread library is linked in */
-#else
-  if(1)
-#endif
-  {
-    struct passwd pwd_buffer;  /* A returned password entry */
-    struct passwd *pwd;        /* A pointer to pwd_buffer */
-    char buffer[512];          /* The buffer in which the string members of */
-                               /* pwd_buffer are stored. */
-/*
- * See if the prefix that is being completed is a complete username.
- */
-    if(!waserr && getpwnam_r(prefix, &pwd_buffer, buffer, sizeof(buffer),
-			     &pwd) == 0 && pwd != NULL) {
-      waserr = callback_fn(data, pwd->pw_name, pwd->pw_dir,
-			   _err_get_msg(home->err), ERR_MSG_LEN);
-    };
-/*
- * See if the username of the current user minimally matches the prefix.
- */
-    if(!waserr && getpwuid_r(getuid(), &pwd_buffer, buffer, sizeof(buffer),
-			     &pwd) == 0 && pwd != NULL &&
-                             strncmp(prefix, pwd->pw_name, prefix_len)==0) {
-      waserr = callback_fn(data, pwd->pw_name, pwd->pw_dir,
-			   _err_get_msg(home->err), ERR_MSG_LEN);
-    };
-/*
- * Reentrancy not required?
- */
-  } else
-#endif
+#if !defined(_POSIX_C_SOURCE) || _POSIX_C_SOURCE < 199506L
   {
     struct passwd *pwd;   /* The pointer to the latest password entry */
 /*
@@ -389,29 +322,27 @@ int _hd_scan_user_home_dirs(HomeDir *home, const char *prefix,
  * that start with the specified prefix, and adding them to the
  * list of matches.
  */
-    while((pwd = getpwent()) != NULL && !waserr) {
-      if(strncmp(prefix, pwd->pw_name, prefix_len) == 0) {
-	waserr = callback_fn(data, pwd->pw_name, pwd->pw_dir,
-			     _err_get_msg(home->err), ERR_MSG_LEN);
-      };
-    };
+    while((pwd = getpwent()) != NULL && !waserr)
+      waserr = callback_fn(data, pwd->pw_name, pwd->pw_dir, home->errmsg,
+			   ERRLEN);
 /*
  * Close the password file.
  */
     endpwent();
   };
+#endif
 /*
  * Under ksh ~+ stands for the absolute pathname of the current working
  * directory.
  */
-  if(!waserr && strncmp(prefix, "+", prefix_len) == 0) {
+  if (!waserr) {
     const char *pwd = hd_getpwd(home);
     if(pwd) {
-      waserr = callback_fn(data, "+", pwd, _err_get_msg(home->err),ERR_MSG_LEN);
+      waserr = callback_fn(data, "+", pwd, home->errmsg, ERRLEN);
     } else {
       waserr = 1;
-      _err_record_msg(home->err, "Can't determine current directory.",
-		      END_ERR_MSG);
+      strncpy(home->errmsg, "Cannot determine current directory.", ERRLEN);
+      home->errmsg[ERRLEN] = '\0';
     };
   };
   return waserr;
@@ -466,5 +397,3 @@ static const char *hd_getpwd(HomeDir *home)
  */
   return cwd;
 }
-
-#endif  /* ifndef WITHOUT_FILE_SYSTEM */

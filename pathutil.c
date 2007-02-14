@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -29,18 +29,11 @@
  * of the copyright holder.
  */
 
-/*
- * If file-system access is to be excluded, this module has no function,
- * so all of its code should be excluded.
- */
-#ifndef WITHOUT_FILE_SYSTEM
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
 #include <ctype.h>
-#include <limits.h>
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -60,9 +53,9 @@ PathName *_new_PathName(void)
 /*
  * Allocate the container.
  */
-  path = (PathName *) malloc(sizeof(PathName));
+  path = (PathName *)malloc(sizeof(PathName));
   if(!path) {
-    errno = ENOMEM;
+    fprintf(stderr, "_new_PathName: Insufficient memory.\n");
     return NULL;
   };
 /*
@@ -83,7 +76,8 @@ PathName *_new_PathName(void)
  */
   path->name = (char *)malloc(path->dim * sizeof(char));
   if(!path->name) {
-    errno = ENOMEM;
+    fprintf(stderr,
+	  "_new_PathName: Insufficient memory to allocate pathname buffer.\n");
     return _del_PathName(path);
   };
   return path;
@@ -121,7 +115,7 @@ char *_pn_clear_path(PathName *path)
  * Check the arguments.
  */
   if(!path) {
-    errno = EINVAL;
+    fprintf(stderr, "_pn_clear_path: NULL argument.\n");
     return NULL;
   };
   path->name[0] = '\0';
@@ -156,7 +150,7 @@ char *_pn_append_to_path(PathName *path, const char *string, int slen,
  * Check the arguments.
  */
   if(!path || !string) {
-    errno = EINVAL;
+    fprintf(stderr, "_pn_append_to_path: NULL argument(s).\n");
     return NULL;
   };
 /*
@@ -227,7 +221,7 @@ char *_pn_prepend_to_path(PathName *path, const char *string, int slen,
  * Check the arguments.
  */
   if(!path || !string) {
-    errno = EINVAL;
+    fprintf(stderr, "_pn_prepend_to_path: NULL argument(s).\n");
     return NULL;
   };
 /*
@@ -291,7 +285,8 @@ char *_pn_prepend_to_path(PathName *path, const char *string, int slen,
  *                       not including the terminating '\0'.
  * Output:
  *  return       char *  The pathname buffer, or NULL if there was
- *                       insufficient memory.
+ *                       insufficient memory (this isn't reported
+ *                       to stderr).
  */
 char *_pn_resize_path(PathName *path, size_t length)
 {
@@ -299,7 +294,7 @@ char *_pn_resize_path(PathName *path, size_t length)
  * Check the arguments.
  */
   if(!path) {
-    errno = EINVAL;
+    fprintf(stderr, "_pn_resize_path: NULL argument(s).\n");
     return NULL;
   };
 /*
@@ -340,7 +335,7 @@ size_t _pu_pathname_dim(void)
  */
 #elif defined(_PC_PATH_MAX)
   errno = 0;
-  maxlen = pathconf(FS_ROOT_DIR, _PC_PATH_MAX);
+  maxlen = fpathconf(FS_ROOT_DIR, _PC_PATH_MAX);
   if(maxlen <= 0 || errno)
     maxlen = MAX_PATHLEN_FALLBACK;
 /*
@@ -448,7 +443,7 @@ char *_pu_start_of_path(const char *string, int back_from)
  * Check the arguments.
  */
   if(!string || back_from < 0) {
-    errno = EINVAL;
+    fprintf(stderr, "_pu_start_path: Invalid argument(s).\n");
     return NULL;
   };
 /*
@@ -503,7 +498,7 @@ char *_pu_end_of_path(const char *string, int start_from)
  * Check the arguments.
  */
   if(!string || start_from < 0) {
-    errno = EINVAL;
+    fprintf(stderr, "_pu_end_path: Invalid argument(s).\n");
     return NULL;
   };
 /*
@@ -535,5 +530,3 @@ int _pu_file_exists(const char *pathname)
   struct stat statbuf;
   return stat(pathname, &statbuf) == 0;
 }
-
-#endif  /* ifndef WITHOUT_FILE_SYSTEM */
