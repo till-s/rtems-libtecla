@@ -20,6 +20,9 @@ INCDIR=@includedir@
 MANDIR=@mandir@
 BINDIR=@bindir@
 
+INSTALL=@INSTALL@
+INSTALL_DATA=@INSTALL_DATA@
+
 # Which C compiler do you want to use?
 
 CC = @CC@
@@ -33,6 +36,14 @@ CC = @CC@
 
 RANLIB = @RANLIB@
 AR     = @AR@
+
+# Optional flags to pass to the linker.
+
+LDFLAGS = @LDFLAGS@
+
+# Optional C pre-processor flags.
+
+CPPFLAGS = @CPPFLAGS@
 
 # The following optional defines change the characteristics of the library.
 #
@@ -77,7 +88,7 @@ DEFINES = @DEFS@
 #   DEFINES_R = -D_POSIX_C_SOURCE=199506L
 #
 
-DEFINES_R = -D_POSIX_C_SOURCE=199506L
+DEFINES_R = @DEFS_R@
 
 #
 # The compiler optimization flags. I like to keep this separate so
@@ -86,7 +97,7 @@ DEFINES_R = -D_POSIX_C_SOURCE=199506L
 # on modifying the library, leave this set to -O.
 #
 
-OPT = -O
+OPT = -g -O
 
 #
 # These are paranoid gcc warning flags to use when compiling new code.
@@ -160,17 +171,17 @@ default: $(TARGETS)
 all:	default
 
 normal:
-	@$(MAKE) -f $(srcdir)/Makefile.rules TARGETS="$(TARGET_LIBS)" SUFFIX="" CFLAGS="$(CFLAGS)" CC="$(CC)" OBJDIR=normal_obj LINK_SHARED='@LINK_SHARED@' SHARED_EXT='@SHARED_EXT@' SHARED_ALT='@SHARED_ALT@' LIBS='$(LIBS)' srcdir='$(srcdir)' LIBDIR='$(LIBDIR)' LN_S='@LN_S@' DEMOS="$(DEMOS)" PROGRAMS='$(PROGRAMS)' RANLIB='$(RANLIB)' AR='$(AR)'
+	@$(MAKE) -f $(srcdir)/Makefile.rules TARGETS="$(TARGET_LIBS)" SUFFIX="" CFLAGS="$(CFLAGS)" CC="$(CC)" OBJDIR=normal_obj LINK_SHARED='@LINK_SHARED@' SHARED_EXT='@SHARED_EXT@' SHARED_ALT='@SHARED_ALT@' LIBS='$(LIBS)' srcdir='$(srcdir)' LIBDIR='$(LIBDIR)' LN_S='@LN_S@' DEMOS="$(DEMOS)" PROGRAMS='$(PROGRAMS)' RANLIB='$(RANLIB)' AR='$(AR)' LDFLAGS=$(LDFLAGS) CPPFLAGS=$(CPPFLAGS)
 
 reentrant:
-	@$(MAKE) -f $(srcdir)/Makefile.rules TARGETS="$(TARGET_LIBS)" SUFFIX="_r" CFLAGS="$(CFLAGS) $(DEFINES_R)" CC="$(CC)" OBJDIR=reentrant_obj LINK_SHARED='@LINK_SHARED@' SHARED_EXT='@SHARED_EXT@' SHARED_ALT='@SHARED_ALT@' LIBS='$(LIBS)' srcdir='$(srcdir)' LIBDIR='$(LIBDIR)' LN_S='@LN_S@' DEMOS="$(DEMOS)" PROGRAMS='$(PROGRAMS_R)' RANLIB='$(RANLIB)' AR='$(AR)'
+	@$(MAKE) -f $(srcdir)/Makefile.rules TARGETS="$(TARGET_LIBS)" SUFFIX="_r" CFLAGS="$(CFLAGS) $(DEFINES_R)" CC="$(CC)" OBJDIR=reentrant_obj LINK_SHARED='@LINK_SHARED@' SHARED_EXT='@SHARED_EXT@' SHARED_ALT='@SHARED_ALT@' LIBS='$(LIBS)' srcdir='$(srcdir)' LIBDIR='$(LIBDIR)' LN_S='@LN_S@' DEMOS="$(DEMOS)" PROGRAMS='$(PROGRAMS_R)' RANLIB='$(RANLIB)' AR='$(AR)' LDFLAGS=$(LDFLAGS) CPPFLAGS=$(CPPFLAGS)
 
 demos: normal
 
 demos_r: reentrant
 
 clean:
-	rm -rf *.o normal_obj reentrant_obj libtecla*.a demo demo2 demo_r demo2_r enhance *~ man3/*~ html/*~ compile_reentrant compile_normal
+	rm -rf *.o normal_obj reentrant_obj libtecla*.a demo demo[0-9] demo_r demo[0-9]_r enhance *~ man/*~ man/*/*~ html/*~ compile_reentrant compile_normal `/bin/ls -1 man/*/*.in | sed 's/\.in$$//'`
 	@endings="@SHARED_EXT@ @SHARED_ALT@" ; \
 	for alt in $$endings ; do \
 	  lib="libtecla*$$alt" ; \
@@ -178,7 +189,8 @@ clean:
 	done
 
 distclean: clean
-	rm -f config.cache config.status config.log Makefile libtecla.map.opt
+	rm -rf config.cache config.status config.log Makefile libtecla.map.opt \
+               autom*.cache
 	cp $(srcdir)/Makefile.stub Makefile
 
 install_lib: $(TARGETS) $(LIBDIR)
@@ -209,20 +221,58 @@ install_inc: $(INCDIR)
 	  echo "cp $(srcdir)/libtecla.h $(INCDIR)/ ; chmod ugo+r $(INCDIR)/libtecla.h"; \
 	fi
 
-install_man: $(MANDIR) $(MANDIR)/man3
-	cd $(srcdir)/man3 && for page in *.3; do cp $$page $(MANDIR)/man3; chmod ugo+r $(MANDIR)/man3/$$page; done
+install_man: $(MANDIR) libr_man func_man prog_man misc_man file_man
+
+libr_man:
+	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
+	  for template in $(srcdir)/man/libr/*.in; do \
+	    page=`basename "$$template" .in`; \
+	    $(INSTALL_DATA) $(srcdir)/man/libr/$$page ${MANDIR}/@LIBR_MANDIR@/$$page.@LIBR_MANEXT@; \
+	  done ; \
+	fi
+
+func_man:
+	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
+	  for template in $(srcdir)/man/func/*.in; do \
+	    page=`basename "$$template" .in`; \
+	    $(INSTALL_DATA) $(srcdir)/man/func/$$page ${MANDIR}/@FUNC_MANDIR@/$$page.@FUNC_MANEXT@; \
+	  done ; \
+	fi
+
+prog_man:
+	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
+	  for template in $(srcdir)/man/prog/*.in; do \
+	    page=`basename "$$template" .in`; \
+	    $(INSTALL_DATA) $(srcdir)/man/prog/$$page ${MANDIR}/@PROG_MANDIR@/$$page.@PROG_MANEXT@; \
+	  done ; \
+	fi
+
+misc_man:
+	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
+	  for template in $(srcdir)/man/misc/*.in; do \
+	    page=`basename "$$template" .in`; \
+	    $(INSTALL_DATA) $(srcdir)/man/misc/$$page ${MANDIR}/@MISC_MANDIR@/$$page.@MISC_MANEXT@; \
+	  done ; \
+	fi
+
+file_man:
+	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
+	  for template in $(srcdir)/man/file/*.in; do \
+	    page=`basename "$$template" .in`; \
+	    $(INSTALL_DATA) $(srcdir)/man/file/$$page ${MANDIR}/@FILE_MANDIR@/$$page.@FILE_MANEXT@; \
+	  done ; \
+	fi
 
 install_bin: $(BINDIR) $(PROGRAMS) $(PROGRAMS_R)
 	progs="$(PROGRAMS) $(PROGRAMS_R)"; \
 	for prog in $$progs; do \
-	  cp $$prog $(BINDIR)/; \
-	  chmod ugo+rx $(BINDIR)/$$prog; \
+	  $(INSTALL) -m 755 -s $$prog $(BINDIR)/; \
 	done
 
 install: install_lib install_inc install_man install_bin
 
 # Make any missing installation directories.
 
-$(MANDIR) $(MANDIR)/man3 $(LIBDIR) $(INCDIR) $(BINDIR):
-	$(srcdir)/install-sh -d $@
+$(MANDIR) $(LIBDIR) $(INCDIR) $(BINDIR):
+	$(INSTALL) -d $@
 	chmod ugo+rx $@

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2001 by Martin C. Shepherd.
+ * Copyright (c) 2000, 2001, 2002, 2003, 2004 by Martin C. Shepherd.
  * 
  * All rights reserved.
  * 
@@ -30,6 +30,12 @@
  */
 
 /*
+ * If file-system access is to be excluded, this module has no function,
+ * so all of its code should be excluded.
+ */
+#ifndef WITHOUT_FILE_SYSTEM
+
+/*
  * Standard includes.
  */
 #include <stdio.h>
@@ -46,11 +52,12 @@
 #include <dirent.h>
 
 #include "direader.h"
+#include "errmsg.h"
 
 /*
  * Use the reentrant POSIX threads version of readdir()?
  */
-#if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
+#if defined(PREFER_REENTRANT) && defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199506L
 #define USE_READDIR_R 1
 #ifdef __rtems__
 /* has no readdir_r but readdir should be safe */
@@ -59,24 +66,17 @@
 #endif
 
 /*
- * Set the max length of the error-reporting string. There is no point
- * in this being longer than the width of a typical terminal window.
- * In composing error messages, I have assumed that this number is
- * at least 80, so you don't decrease it below this number.
- */
-#define ERRLEN 200
-
-/*
  * Objects of the following type are used to maintain the resources
  * needed to read directories.
  */
 struct DirReader {
-  DIR *dir;              /* The directory stream (if open, NULL otherwise) */
-  struct dirent *file;   /* The latest directory entry */
-  char errmsg[ERRLEN+1]; /* Error-report buffer */
+  ErrMsg *err;             /* The error reporting buffer */
+  DIR *dir;                /* The directory stream (if open, NULL otherwise) */
+  struct dirent *file;     /* The latest directory entry */
 #ifdef USE_READDIR_R
-  struct dirent *buffer; /* A buffer used by the threaded version of readdir */
-  int buffer_dim;        /* The allocated size of buffer[] */
+  struct dirent *buffer;   /* A buffer used by the threaded version of */
+                           /*  readdir() */
+  int buffer_dim;          /* The allocated size of buffer[] */
 #endif
 };
 
@@ -96,7 +96,7 @@ DirReader *_new_DirReader(void)
  */
   dr = (DirReader *) malloc(sizeof(DirReader));
   if(!dr) {
-    fprintf(stderr, "_new_DirReader: Insufficient memory.\n");
+    errno = ENOMEM;
     return NULL;
   };
 /*
@@ -104,13 +104,19 @@ DirReader *_new_DirReader(void)
  * container at least up to the point at which it can safely be passed
  * to _del_DirReader().
  */
+  dr->err = NULL;
   dr->dir = NULL;
   dr->file = NULL;
-  dr->errmsg[0] = '\0';
 #ifdef USE_READDIR_R
   dr->buffer = NULL;
   dr->buffer_dim = 0;
 #endif
+/*
+ * Allocate a place to record error messages.
+ */
+  dr->err = _new_ErrMsg();
+  if(!dr->err)
+    return _del_DirReader(dr);
   return dr;
 }
 
@@ -129,6 +135,7 @@ DirReader *_del_DirReader(DirReader *dr)
 #ifdef USE_READDIR_R
     free(dr->buffer);
 #endif
+    dr->err = _del_ErrMsg(dr->err);
     free(dr);
   };
   return NULL;
@@ -160,9 +167,8 @@ int _dr_open_dir(DirReader *dr, const char *path, char **errmsg)
  */
   if(!_dr_path_is_dir(path)) {
     if(errmsg) {
-      const char *fmt = "Can't open directory: %.*s\n";
-      sprintf(dr->errmsg, fmt, ERRLEN - strlen(fmt), path);
-      *errmsg = dr->errmsg;
+      _err_record_msg(dr->err, "Can't open directory: ", path, END_ERR_MSG);
+      *errmsg = _err_get_msg(dr->err);
     };
     return 1;
   };
@@ -172,9 +178,8 @@ int _dr_open_dir(DirReader *dr, const char *path, char **errmsg)
   dir = opendir(path);
   if(!dir) {
     if(errmsg) {
-      const char *fmt = "Can't open directory: %.*s\n";
-      sprintf(dr->errmsg, fmt, ERRLEN - strlen(fmt), path);
-      *errmsg = dr->errmsg;
+      _err_record_msg(dr->err, "Can't open directory: ", path, END_ERR_MSG);
+      *errmsg = _err_get_msg(dr->err);
     };
     return 1;
   };
@@ -191,8 +196,9 @@ int _dr_open_dir(DirReader *dr, const char *path, char **errmsg)
 #endif
     if(name_max < 0) {
       if(errmsg) {
-	strcpy(dr->errmsg, "Unable to deduce readdir() buffer size.");
-	*errmsg = dr->errmsg;
+	_err_record_msg(dr->err, "Unable to deduce readdir() buffer size.",
+			END_ERR_MSG);
+	*errmsg = _err_get_msg(dr->err);
       };
       closedir(dir);
       return 1;
@@ -210,10 +216,12 @@ int _dr_open_dir(DirReader *dr, const char *path, char **errmsg)
 						 malloc(size));
       if(!buffer) {
 	if(errmsg) {
-	  strcpy(dr->errmsg, "Insufficient memory for readdir() buffer.");
-	  *errmsg = dr->errmsg;
+	  _err_record_msg(dr->err, "Insufficient memory for readdir() buffer.",
+			  END_ERR_MSG);
+	  *errmsg = _err_get_msg(dr->err);
 	};
 	closedir(dir);
+	errno = ENOMEM;
 	return 1;
       };
       dr->buffer = buffer;
@@ -241,7 +249,7 @@ void _dr_close_dir(DirReader *dr)
     closedir(dr->dir);
     dr->dir = NULL;
     dr->file = NULL;
-    dr->errmsg[0] = '\0';
+    _err_clear_msg(dr->err);
   };
 }
 
@@ -301,3 +309,5 @@ static int _dr_path_is_dir(const char *pathname)
  */
   return S_ISDIR(statbuf.st_mode) != 0;
 }
+
+#endif  /* ifndef WITHOUT_FILE_SYSTEM */

@@ -2656,10 +2656,14 @@ static int gl_raw_terminal_mode(GetLine *gl)
  */
   newattr.c_cflag &= ~(CSIZE | PARENB);
   newattr.c_cflag |= CS8;
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
 /*
  * Turn off output processing.
  */
   newattr.c_oflag &= ~(OPOST);
+#endif
 /*
  * Request one byte at a time, without waiting.
  */
@@ -3163,6 +3167,11 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  */
 static int gl_read_terminal(GetLine *gl, int keep, char *c)
 {
+#if CONFIG_OPOST_HACK == 1
+Termios attr;
+Termios *pa = 0;
+#endif
+int status;
 /*
  * Before waiting for a new character to be input, flush unwritten
  * characters to the terminal.
@@ -3205,10 +3214,27 @@ static int gl_read_terminal(GetLine *gl, int keep, char *c)
     errno = EIO;
     return 1;
   };
+
+#if CONFIG_OPOST_HACK == 1
+  if (0==tcgetattr(gl->input_fd, &attr)) {
+    attr.c_oflag |= OPOST;
+    tcsetattr(gl->input_fd, TCSADRAIN, &attr);
+    attr.c_oflag &= ~OPOST;
+    pa = &attr;
+  }
+#endif
+
+  status = gl_read_input(gl, c);
+
+#if CONFIG_OPOST_HACK == 1
+  if (pa)
+    tcsetattr(gl->input_fd, TCSADRAIN, pa);
+#endif
+
 /*
  * Read one character from the terminal.
  */
-  switch(gl_read_input(gl, c)) {
+  switch(status) {
   case GL_READ_OK:
     break;
   case GL_READ_BLOCKED:
