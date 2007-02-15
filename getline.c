@@ -10424,8 +10424,10 @@ static int gl_present_line(GetLine *gl, const char *prompt,
 /*
  * Load the line into the buffer.
  */
-    if(start_line != gl->line)
+    if(start_line != gl->line) {
+      gl_truncate_buffer(gl, 0);
       gl_buffer_string(gl, start_line, start_len, 0);
+    }
 /*
  * Strip off any trailing newline and carriage return characters.
  */
