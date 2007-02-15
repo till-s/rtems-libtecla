@@ -93,7 +93,7 @@ int main(int argc, char *argv[])
 /*
  * Get a new line from the user.
  */
-    line = gl_get_line(gl, "$ ", "test", 0);
+    line = gl_get_line(gl, "$ ", NULL, 0);
     if(!line)
       break;
 /*
