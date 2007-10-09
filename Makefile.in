@@ -224,7 +224,7 @@ install_inc: $(INCDIR)
 
 install_man: $(MANDIR) libr_man func_man prog_man misc_man file_man
 
-libr_man:
+libr_man: ${MANDIR}/@LIBR_MANDIR@
 	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
 	  for template in $(srcdir)/man/libr/*.in; do \
 	    page=`basename "$$template" .in`; \
@@ -232,7 +232,7 @@ libr_man:
 	  done ; \
 	fi
 
-func_man:
+func_man: ${MANDIR}/@FUNC_MANDIR@
 	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
 	  for template in $(srcdir)/man/func/*.in; do \
 	    page=`basename "$$template" .in`; \
@@ -240,7 +240,7 @@ func_man:
 	  done ; \
 	fi
 
-prog_man:
+prog_man: ${MANDIR}/@PROG_MANDIR@
 	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
 	  for template in $(srcdir)/man/prog/*.in; do \
 	    page=`basename "$$template" .in`; \
@@ -248,7 +248,7 @@ prog_man:
 	  done ; \
 	fi
 
-misc_man:
+misc_man: ${MANDIR}/@MISC_MANDIR@
 	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
 	  for template in $(srcdir)/man/misc/*.in; do \
 	    page=`basename "$$template" .in`; \
@@ -256,7 +256,7 @@ misc_man:
 	  done ; \
 	fi
 
-file_man:
+file_man: ${MANDIR}/@FILE_MANDIR@
 	if test "@MAKE_MAN_PAGES@"_ = "yes"_; then \
 	  for template in $(srcdir)/man/file/*.in; do \
 	    page=`basename "$$template" .in`; \
@@ -274,6 +274,6 @@ install: install_lib install_inc install_man install_bin
 
 # Make any missing installation directories.
 
-$(MANDIR) $(LIBDIR) $(INCDIR) $(BINDIR):
+$(MANDIR) $(LIBDIR) $(INCDIR) $(BINDIR) $(MANDIR)/@LIBR_MANDIR@ $(MANDIR)/@FUNC_MANDIR@ $(MANDIR)/@PROG_MANDIR@ $(MANDIR)/@MISC_MANDIR@ $(MANDIR)/@FILE_MANDIR@:
 	$(INSTALL) -d $@
 	chmod ugo+rx $@
