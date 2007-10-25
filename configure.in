@@ -149,7 +149,8 @@ dnl they were found is appended to the LIBS shell variable.
 dnl termcap/terminfo is not reentrant [thanks to Eric Norum for
 dnl pointing this out].
 
-if test $host_os != rtems; then
+case $host_os in
+	*rtems*|*RTEMS*)
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
@@ -161,7 +162,8 @@ AC_CHECK_LIB(curses, tigetstr, [
   LIBS="$LIBS -lcurses"
   AC_CHECK_HEADER(termcap.h, AC_DEFINE(HAVE_TERMCAP_H))
 ])])])
-fi
+	;;
+esac
 
 dnl Search for the curses.h and term.h header files, first in the
 dnl standard system-include directories, and then if not found there,
@@ -172,19 +174,23 @@ dnl including curses.h causes complaints, so when checking for term.h
 dnl we tell AC_CHECK_HEADERS() to include curses.h in the test file
 dnl that it attempts to compile.
 
-dnl TSILL if test $host_os != rtems; then
+dnl TSILL case $host_os in
+dnl TSILL 	*rtems*|*RTEMS*)
 dnl TSILL AC_CHECK_HEADER(term.h, AC_DEFINE(HAVE_TERM_H), [
 dnl TSILL   AC_CHECK_HEADER(ncurses/term.h, AC_DEFINE(HAVE_NCURSES_TERM_H))
 dnl TSILL ])
-dnl TSILL fi 
+dnl TSILL ;;
+dnl TSILL esac
 
 dnl TSILL dnl Do the same search for curses.h.
 
-dnl TSILL if test $host_os != rtems; then
+dnl TSILL case $host_os in
+dnl TSILL 	*rtems*|*RTEMS*)
 dnl TSILL AC_CHECK_HEADER(curses.h, AC_DEFINE(HAVE_CURSES_H), [
 dnl TSILL   AC_CHECK_HEADER(ncurses/curses.h, AC_DEFINE(HAVE_NCURSES_CURSES_H))
 dnl TSILL ])
-dnl TSILL fi
+dnl TSILL ;;
+dnl TSILL esac
 AC_CHECK_HEADERS(curses.h, [AC_CHECK_HEADERS(term.h,[],[],[#include <curses.h>])], [AC_CHECK_HEADERS(ncurses/curses.h, [AC_CHECK_HEADERS(ncurses/term.h,[],[],[#include <ncurses/curses.h>])])])
 dnl TSILL 
 
@@ -231,11 +237,13 @@ dnl available, default to only compiling the non-reentrant version of
 dnl the library.
 
 if test $tecla_cv_reentrant = no; then
-if test $host_os = rtems; then
+case $host_os in
+	*rtems*|*RTEMS*)
   TARGETS="reentrant"
-else
+	;;
+	*)
   TARGETS="normal"
-fi
+esac
 fi
 
 dnl If sys/select.h exists, arrange for the HAVE_SYS_SELECT_H C-macro to
