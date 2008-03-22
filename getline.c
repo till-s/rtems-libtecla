@@ -58,6 +58,7 @@
  */
 #ifndef __rtems__
 #include <sys/ioctl.h>
+/* Don't want to pull in <sys/ioctl.h> which lives in libcpu/bsp area... */
 #else
 #undef HAVE_SELECT
 #endif
