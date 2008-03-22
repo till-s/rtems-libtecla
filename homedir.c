@@ -127,7 +127,7 @@ HomeDir *_new_HomeDir(void)
  * Get the length of the buffer needed by the reentrant version
  * of getpwnam().
  */
-#ifndef _SC_GETPW_R_SIZE_MAX
+#if ! defined(_SC_GETPW_R_SIZE_MAX) || defined(__rtems__)
   home->buflen = DEF_GETPW_R_SIZE_MAX;
 #else
   errno = 0;
