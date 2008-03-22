@@ -303,7 +303,7 @@ ExpandFile *del_ExpandFile(ExpandFile *ef)
  *  [chars]  -  Match any single character that appears in 'chars'.
  *              If 'chars' contains an expression of the form a-b,
  *              then any character between a and b, including a and b,
- *              matches. The '-' character looses its special meaning
+ *              matches. The '-' character loses its special meaning
  *              as a range specifier when it appears at the start
  *              of the sequence of characters.
  *  [^chars] -  The same as [chars] except that it matches any single
