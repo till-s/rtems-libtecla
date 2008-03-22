@@ -41,6 +41,10 @@
 
 #include "libtecla.h"
 
+#ifdef __rtems__
+#define main tecla_main
+#endif
+
 /* The function which displays the introductory text of the demo */
 
 static void show_demo_introduction(GetLine *gl);
