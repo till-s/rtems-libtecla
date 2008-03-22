@@ -29,6 +29,18 @@
  * of the copyright holder.
  */
 
+
+/* re-enable OPOST so others may print to the RTEMS console
+ * T. Straumann, 2003/3/18
+ *
+ */
+/* OPOST_HACK values:
+ *  1 enable OPOST while waiting for input chars 
+ *  2 globally (always) enable OPOST
+ *  undefined: do not use any hack
+ */
+#define CONFIG_OPOST_HACK  1
+
 /*
  * Standard headers.
  */
@@ -44,7 +56,13 @@
 /*
  * UNIX headers.
  */
+#ifndef __rtems__
 #include <sys/ioctl.h>
+/* Don't want to pull in <sys/ioctl.h> which lives in libcpu/bsp area... */
+#else
+#undef HAVE_SELECT
+#endif
+
 #ifdef HAVE_SELECT
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
@@ -130,7 +148,11 @@ static TputsRetType gl_tputs_putchar(TputsArgType c);
  */
 #include <unistd.h>
 #include <fcntl.h>
+#ifdef __rtems__
+#include <rtems-hackdefs.h> /* avoid pulling in BSP headers and termios is :-( */
+#else
 #include <termios.h>
+#endif
 
 /*
  * Provide typedefs for standard POSIX structures.
@@ -635,12 +657,20 @@ static const struct GlDefSignal {
  * Define file-scope variables for use in signal handlers.
  */
 static volatile sig_atomic_t gl_pending_signal = -1;
+#ifndef __rtems__
 static sigjmp_buf gl_setjmp_buffer;
 
 static void gl_signal_handler(int signo);
+#else
+#ifdef sigsetjmp
+#undef sigsetjmp
+#endif
+#define sigsetjmp(buf, save) 0
+#endif
 
 static int gl_check_caught_signal(GetLine *gl);
 
+#ifndef __rtems__
 /*
  * Respond to an externally caught process suspension or
  * termination signal.
@@ -650,7 +680,9 @@ static void gl_suspend_process(int signo, GetLine *gl, int ngl);
 /* Return the default attributes of a given signal */
 
 static int gl_classify_signal(int signo);
+#endif
 
+#if defined(USE_TERMINFO) || defined(USE_TERMCAP)
 /*
  * Unfortunately both terminfo and termcap require one to use the tputs()
  * function to output terminal control characters, and this function
@@ -659,6 +691,7 @@ static int gl_classify_signal(int signo);
  * This is bad, but there doesn't seem to be any alternative.
  */
 static GetLine *tputs_gl = NULL;
+#endif
 
 /*
  * Define a tab to be a string of 8 spaces.
@@ -2474,6 +2507,7 @@ static int _gl_query_char(GetLine *gl, const char *prompt, char defchar)
  */
 static int gl_override_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Set up our signal handler.
@@ -2518,6 +2552,7 @@ static int gl_override_signal_handlers(GetLine *gl)
  * been overriden.
  */
   gl->signals_overriden = 1;
+#endif
 /*
  * Just in case a SIGWINCH signal was sent to the process while our
  * SIGWINCH signal handler wasn't in place, check to see if the terminal
@@ -2539,6 +2574,7 @@ static int gl_override_signal_handlers(GetLine *gl)
  */
 static int gl_restore_signal_handlers(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;   /* A node in the list of signals to be caught */
 /*
  * Restore application signal handlers that were overriden
@@ -2556,9 +2592,11 @@ static int gl_restore_signal_handlers(GetLine *gl)
  * been restored.
  */
   gl->signals_overriden = 0;
+#endif
   return 0;
 }
 
+#ifndef __rtems__
 /*.......................................................................
  * This signal handler simply records the fact that a given signal was
  * caught in the file-scope gl_pending_signal variable.
@@ -2568,6 +2606,7 @@ static void gl_signal_handler(int signo)
   gl_pending_signal = signo;
   siglongjmp(gl_setjmp_buffer, 1);
 }
+#endif
 
 /*.......................................................................
  * Switch the terminal into raw mode after storing the previous terminal
@@ -2618,10 +2657,14 @@ static int gl_raw_terminal_mode(GetLine *gl)
  */
   newattr.c_cflag &= ~(CSIZE | PARENB);
   newattr.c_cflag |= CS8;
+#if CONFIG_OPOST_HACK == 2
+  /* always use OPOST */
+#else
 /*
  * Turn off output processing.
  */
   newattr.c_oflag &= ~(OPOST);
+#endif
 /*
  * Request one byte at a time, without waiting.
  */
@@ -3125,6 +3168,11 @@ static int gl_add_string_to_line(GetLine *gl, const char *s)
  */
 static int gl_read_terminal(GetLine *gl, int keep, char *c)
 {
+#if CONFIG_OPOST_HACK == 1
+Termios attr;
+Termios *pa = 0;
+#endif
+int status;
 /*
  * Before waiting for a new character to be input, flush unwritten
  * characters to the terminal.
@@ -3167,10 +3215,27 @@ static int gl_read_terminal(GetLine *gl, int keep, char *c)
     errno = EIO;
     return 1;
   };
+
+#if CONFIG_OPOST_HACK == 1
+  if (0==tcgetattr(gl->input_fd, &attr)) {
+    attr.c_oflag |= OPOST;
+    tcsetattr(gl->input_fd, TCSADRAIN, &attr);
+    attr.c_oflag &= ~OPOST;
+    pa = &attr;
+  }
+#endif
+
+  status = gl_read_input(gl, c);
+
+#if CONFIG_OPOST_HACK == 1
+  if (pa)
+    tcsetattr(gl->input_fd, TCSADRAIN, pa);
+#endif
+
 /*
  * Read one character from the terminal.
  */
-  switch(gl_read_input(gl, c)) {
+  switch(status) {
   case GL_READ_OK:
     break;
   case GL_READ_BLOCKED:
@@ -3359,10 +3424,12 @@ static void gl_discard_chars(GetLine *gl, int nused)
  */
 static int gl_check_caught_signal(GetLine *gl)
 {
+#ifndef __rtems__
   GlSignalNode *sig;      /* The signal disposition */
   SigAction keep_action;  /* The signal disposition of tecla signal handlers */
   unsigned flags;         /* The signal processing flags to use */
   int signo;              /* The signal to be handled */
+
 /*
  * Was no signal caught?
  */
@@ -3493,6 +3560,7 @@ static int gl_check_caught_signal(GetLine *gl)
     return gl->is_term && gl_flush_output(gl);
     break;
   };
+#endif
   return 0;
 }
 
@@ -10285,6 +10353,9 @@ static int gl_line_ended(GetLine *gl, int newline_char)
     if(gl_end_of_line(gl, 1, NULL) || gl_add_char_to_line(gl, newline_char))
       return 1;
   } else {
+#ifdef LIBTECLA_ACCEPT_NONPRINTING_LINE_END /* still map \r to \n */
+	if ( '\r' == newline_char )
+#endif
 /*
  * Otherwise just append a newline character to the input line buffer.
  */
@@ -10424,8 +10495,10 @@ static int gl_present_line(GetLine *gl, const char *prompt,
 /*
  * Load the line into the buffer.
  */
-    if(start_line != gl->line)
+    if(start_line != gl->line) {
+      gl_truncate_buffer(gl, 0);
       gl_buffer_string(gl, start_line, start_len, 0);
+    }
 /*
  * Strip off any trailing newline and carriage return characters.
  */
@@ -11363,6 +11436,10 @@ int gl_display_text(GetLine *gl, int indentation, const char *prefix,
  */
 static int gl_mask_signals(GetLine *gl, sigset_t *oldset)
 {
+#ifdef __rtems__
+	gl->signals_masked = 1;
+	return 0;
+#else
 /*
  * Block all signals in all_signal_set, along with any others that are
  * already blocked by the application.
@@ -11380,6 +11457,7 @@ static int gl_mask_signals(GetLine *gl, sigset_t *oldset)
     (void) sigprocmask(SIG_SETMASK, NULL, oldset);
   gl->signals_masked = 0;
   return 1;
+#endif
 }
 
 /*.......................................................................
@@ -11397,7 +11475,11 @@ static int gl_mask_signals(GetLine *gl, sigset_t *oldset)
 static int gl_unmask_signals(GetLine *gl, sigset_t *oldset)
 {
   gl->signals_masked = 0;
+#ifdef __rtems__
+  return 0;
+#else
   return sigprocmask(SIG_SETMASK, oldset, NULL) < 0;
+#endif
 }
 
 /*.......................................................................
@@ -11411,7 +11493,11 @@ static int gl_unmask_signals(GetLine *gl, sigset_t *oldset)
  */
 static int gl_catch_signals(GetLine *gl)
 {
+#ifdef __rtems__
+  return 0;
+#else
   return sigprocmask(SIG_UNBLOCK, &gl->use_signal_set, NULL) < 0;
+#endif
 }
 
 /*.......................................................................
@@ -11663,6 +11749,7 @@ void gl_catch_blocked(GetLine *gl)
  */
 void gl_handle_signal(int signo, GetLine *gl, int ngl)
 {
+#ifndef __rtems__
   int attr;             /* The attributes of the specified signal */
   sigset_t all_signals; /* The set of trappable signals */
   sigset_t oldset;      /* The process signal mask to restore */
@@ -11709,9 +11796,11 @@ void gl_handle_signal(int signo, GetLine *gl, int ngl)
  * to gl_mask_signals().
  */
   sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
   return;
 }
 
+#ifndef __rtems__
 /*.......................................................................
  * Respond to an externally caught process suspension or
  * termination signal.
@@ -11836,6 +11925,7 @@ static int gl_classify_signal(int signo)
  */
   return 0;
 }
+#endif
 
 /*.......................................................................
  * When in non-blocking server mode, this function can be used to abandon
