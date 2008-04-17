@@ -167,9 +167,16 @@ PROGRAMS_R =
 
 CFLAGS = $(OPT) $(WARNING_FLAGS) $(DEFINES) @CFLAGS@ @SHARED_CFLAGS@ -I@srcdir@/../
 
+MULTISRCTOP = 
+MULTIBUILDTOP = 
+MULTIDIRS = 
+MULTISUBDIR = 
+MULTIDO = true
+MULTICLEAN = true
+
 default: $(TARGETS)
 
-all:	default
+all:	default all-multi
 
 normal:
 	@$(MAKE) -f $(srcdir)/Makefile.rules TARGETS="$(TARGET_LIBS)" SUFFIX="" CFLAGS="$(CFLAGS)" CC="$(CC)" OBJDIR=normal_obj LINK_SHARED='@LINK_SHARED@' SHARED_EXT='@SHARED_EXT@' SHARED_ALT='@SHARED_ALT@' LIBS='$(LIBS)' srcdir='$(srcdir)' LIBDIR='$(LIBDIR)' LN_S='@LN_S@' DEMOS="$(DEMOS)" PROGRAMS='$(PROGRAMS)' RANLIB='$(RANLIB)' AR='$(AR)' LDFLAGS=$(LDFLAGS) CPPFLAGS=$(CPPFLAGS)
@@ -181,7 +188,7 @@ demos: normal
 
 demos_r: reentrant
 
-clean:
+clean: clean-multi
 	rm -rf *.o normal_obj reentrant_obj libtecla*.a demo demo[0-9] demo_r demo[0-9]_r enhance *~ man/*~ man/*/*~ html/*~ compile_reentrant compile_normal `/bin/ls -1 man/*/*.in | sed 's/\.in$$//'`
 	@endings="@SHARED_EXT@ @SHARED_ALT@" ; \
 	for alt in $$endings ; do \
@@ -189,7 +196,7 @@ clean:
 	  rm -f $$lib; echo rm -f $$lib ; \
 	done
 
-distclean: clean
+distclean: clean distclean-multi
 	rm -rf config.cache config.status config.log Makefile libtecla.map.opt \
                autom*.cache
 	cp $(srcdir)/Makefile.stub Makefile
@@ -270,10 +277,19 @@ install_bin: $(BINDIR) $(PROGRAMS) $(PROGRAMS_R)
 	  $(INSTALL) -m 755 -s $$prog $(BINDIR)/; \
 	done
 
-install: install_lib install_inc install_man install_bin
+install: install_lib install_inc install_man install_bin install-multi
 
 # Make any missing installation directories.
 
 $(MANDIR) $(LIBDIR) $(INCDIR) $(BINDIR) $(MANDIR)/@LIBR_MANDIR@ $(MANDIR)/@FUNC_MANDIR@ $(MANDIR)/@PROG_MANDIR@ $(MANDIR)/@MISC_MANDIR@ $(MANDIR)/@FILE_MANDIR@:
 	$(INSTALL) -d $@
 	chmod ugo+rx $@
+	
+all-multi:
+	$(MAKE) $(AM_MAKEFLAGS) DO=all multi-do # $(MAKE)
+install-multi:
+	$(MAKE) $(AM_MAKEFLAGS) DO=install multi-do # $(MAKE)
+clean-multi:
+	$(MAKE) $(AM_MAKEFLAGS) DO=clean multi-clean # $(MAKE)
+distclean-multi:
+	$(MAKE) $(AM_MAKEFLAGS) DO=distclean multi-clean # $(MAKE)

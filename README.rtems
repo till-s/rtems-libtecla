@@ -1,6 +1,16 @@
 The libtecla contained in this directory differs from the
 original version:
 
+T.S, 2008/04/16: added support for multilibs. I retired the old Makefile.in
+                 and created a 'Makefile.am' instead which can be used with
+				 automake.
+				 HOWEVER:
+				 	- shared libraries are not supported.
+					- xxx_MANDIR, xxx_MANEXT defined in 'configure.in' are 
+					  ignored. The manpages are installed in the subdirectories
+					  defined in the Makefile.am (due to automake shortcomings).
+
+
 - RTEMS port (look for the #ifdef __rtems__ symbols)
 - On RTEMS, we always and exclusively use the reentrant library version
 - Shared libraries are disabled for host builds (to avoid LD_LIBRARY_PATH
