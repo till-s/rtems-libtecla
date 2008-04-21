@@ -1,4 +1,4 @@
-AUTOMAKE_OPTIONS=foreign no-installinfo no-installman
+AUTOMAKE_OPTIONS=foreign
 
 
 TARGET_normal_static=libtecla.a
@@ -35,9 +35,6 @@ man7_MANS = $(foreach xx,$(wildcard $(srcdir)/man/misc/*.in),$(xx:%.in=%))
 man5_MANS = $(foreach xx,$(wildcard $(srcdir)/man/file/*.in),$(xx:%.in=%))
 man1_MANS = $(foreach xx,$(wildcard $(srcdir)/man/prog/*.in),$(xx:%.in=%))
 
-# automake seems not to install manpages in spite of the manual saying so
-install-data-local: install-man
-uninstall-local: uninstall-man
 endif
 
 include_HEADERS=$(srcdir)/libtecla.h
