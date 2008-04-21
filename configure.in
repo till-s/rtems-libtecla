@@ -153,7 +153,9 @@ dnl termcap/terminfo is not reentrant [thanks to Eric Norum for
 dnl pointing this out].
 
 case $host_os in
-	*rtems*|*RTEMS*)
+	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+	;;
+	*)
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
@@ -178,7 +180,9 @@ dnl we tell AC_CHECK_HEADERS() to include curses.h in the test file
 dnl that it attempts to compile.
 
 dnl TSILL case $host_os in
-dnl TSILL 	*rtems*|*RTEMS*)
+dnl TSILL	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+dnl TSILL   ;;
+dnl TSILL   *)
 dnl TSILL AC_CHECK_HEADER(term.h, AC_DEFINE(HAVE_TERM_H), [
 dnl TSILL   AC_CHECK_HEADER(ncurses/term.h, AC_DEFINE(HAVE_NCURSES_TERM_H))
 dnl TSILL ])
@@ -188,7 +192,9 @@ dnl TSILL esac
 dnl TSILL dnl Do the same search for curses.h.
 
 dnl TSILL case $host_os in
-dnl TSILL 	*rtems*|*RTEMS*)
+dnl TSILL	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+dnl TSILL   ;;
+dnl TSILL   *)
 dnl TSILL AC_CHECK_HEADER(curses.h, AC_DEFINE(HAVE_CURSES_H), [
 dnl TSILL   AC_CHECK_HEADER(ncurses/curses.h, AC_DEFINE(HAVE_NCURSES_CURSES_H))
 dnl TSILL ])
@@ -243,7 +249,7 @@ dnl the library.
 
 if test $tecla_cv_reentrant = no; then
 case $host_os in
-	*rtems*|*RTEMS*)
+	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
   TARGETS="reentrant"
 	;;
 	*)
