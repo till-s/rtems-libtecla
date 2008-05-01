@@ -151,6 +151,7 @@ dnl pointing this out].
 
 case $host_os in
 	*rtems*|*RTEMS*)
+AC_CHECK_HEADER(sys/termios.h, AC_DEFINE(HAVE_SYS_TERMIOS_H))
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
