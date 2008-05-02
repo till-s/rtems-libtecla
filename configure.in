@@ -623,8 +623,10 @@ if test "$MAKE_MAN_PAGES"_ = "yes"_ -a "${with_multisubdir}x" == "x" ; then
 fi
 AM_CONDITIONAL(MAKE_MAN_PAGES, test "$MAKE_MAN_PAGES"_ = "yes"_ -a "${with_multisubdir}x" == "x")
 
+if test -f ../config-ml.in || test -f ../../config-ml.in ; then
 AM_ENABLE_MULTILIB([Makefile],[..])
 dnl install multilibs into MULTISUBDIR
+fi
 AC_SUBST(libdir,[${libdir}'$(MULTISUBDIR)'])
 
 dnl The following directive must always be the last line of any
