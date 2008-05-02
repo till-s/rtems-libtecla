@@ -16,10 +16,10 @@ libtecla_r_a_SOURCES+= version.c
 
 libtecla_a_SOURCES=$(libtecla_r_a_SOURCES)
 
-libtecla_a_CPPFLAGS=-I@srcdir@/.. @DEFS@
-libtecla_r_a_CPPFLAGS=$(libtecla_a_CPPFLAGS) @DEFS_R@
+libtecla_a_CPPFLAGS=-I@srcdir@/.. @DEFS@ $(AM_CPPFLAGS)
+libtecla_r_a_CPPFLAGS=$(libtecla_a_CPPFLAGS) @DEFS_R@ $(AM_CPPFLAGS)
 
-libtecla_s_CFLAGS=$(SHARED_CFLAGS)
+libtecla_s_CFLAGS=$(SHARED_CFLAGS) $(AM_CFLAGS)
 
 
 if MAKE_MAN_PAGES
