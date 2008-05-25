@@ -1,25 +1,25 @@
 AUTOMAKE_OPTIONS=foreign
 
 
-TARGET_normal_static=libtecla.a
-TARGET_reentrant_static=libtecla_r.a
+TARGET_normal_static   = libtecla.a
+TARGET_reentrant_static= libtecla_r.a
 
-EXTRA_LIBRARIES=$(TARGET_normal_static) $(TARGET_reentrant_static)
+EXTRA_LIBRARIES        = $(TARGET_normal_static) $(TARGET_reentrant_static)
 
-lib_LIBRARIES=$(TGTLIBS)
+lib_LIBRARIES          = $(TGTLIBS)
 
-libtecla_r_a_SOURCES=chrqueue.c cplfile.c cplmatch.c
-libtecla_r_a_SOURCES+= direader.c errmsg.c expand.c freelist.c
-libtecla_r_a_SOURCES+= getline.c hash.c history.c homedir.c ioutil.c
-libtecla_r_a_SOURCES+= keytab.c pathutil.c pcache.c stringrp.c strngmem.c
-libtecla_r_a_SOURCES+= version.c
+libtecla_r_a_SOURCES   = chrqueue.c cplfile.c cplmatch.c
+libtecla_r_a_SOURCES  += direader.c errmsg.c expand.c freelist.c
+libtecla_r_a_SOURCES  += getline.c hash.c history.c homedir.c ioutil.c
+libtecla_r_a_SOURCES  += keytab.c pathutil.c pcache.c stringrp.c strngmem.c
+libtecla_r_a_SOURCES  += version.c
 
-libtecla_a_SOURCES=$(libtecla_r_a_SOURCES)
+libtecla_a_SOURCES     = $(libtecla_r_a_SOURCES)
 
-libtecla_a_CPPFLAGS=-I@srcdir@/.. @DEFS@ $(AM_CPPFLAGS)
-libtecla_r_a_CPPFLAGS=$(libtecla_a_CPPFLAGS) @DEFS_R@ $(AM_CPPFLAGS)
+libtecla_a_CPPFLAGS    = $(AM_CPPFLAGS) -I@srcdir@/.. @DEFS@
+libtecla_r_a_CPPFLAGS  = $(AM_CPPFLAGS) -I@srcdir@/.. @DEFS_R@
 
-libtecla_s_CFLAGS=$(SHARED_CFLAGS) $(AM_CFLAGS)
+libtecla_s_CFLAGS      = $(AM_CFLAGS) $(SHARED_CFLAGS)
 
 
 if MAKE_MAN_PAGES
@@ -29,15 +29,15 @@ if MAKE_MAN_PAGES
 # Hence @ FUNC_MANDIR @_MANS=xxx does not work :-(.
 #
 # We just hardcode the sections here...
-man3_MANS = $(foreach xx,$(wildcard $(srcdir)/man/func/*.in),$(xx:%.in=%))
+man3_MANS  = $(foreach xx,$(wildcard $(srcdir)/man/func/*.in),$(xx:%.in=%))
 man3_MANS += $(foreach xx,$(wildcard $(srcdir)/man/libr/*.in),$(xx:%.in=%))
-man7_MANS = $(foreach xx,$(wildcard $(srcdir)/man/misc/*.in),$(xx:%.in=%))
-man5_MANS = $(foreach xx,$(wildcard $(srcdir)/man/file/*.in),$(xx:%.in=%))
-man1_MANS = $(foreach xx,$(wildcard $(srcdir)/man/prog/*.in),$(xx:%.in=%))
+man7_MANS  = $(foreach xx,$(wildcard $(srcdir)/man/misc/*.in),$(xx:%.in=%))
+man5_MANS  = $(foreach xx,$(wildcard $(srcdir)/man/file/*.in),$(xx:%.in=%))
+man1_MANS  = $(foreach xx,$(wildcard $(srcdir)/man/prog/*.in),$(xx:%.in=%))
 
 endif
 
-include_HEADERS=$(srcdir)/libtecla.h
+include_HEADERS = $(srcdir)/libtecla.h
 
 # enhance.c
 # demo2.c
