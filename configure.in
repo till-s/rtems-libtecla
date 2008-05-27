@@ -62,6 +62,7 @@ dnl for the optimization level.
 
 CFLAGS="$CFLAGS"
 AC_PROG_CC
+AC_PROG_CPP
 
 dnl Apparently not all implementations of the 'make' command define
 dnl the MAKE variable. The following directive creates a variable
