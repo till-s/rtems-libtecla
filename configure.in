@@ -92,12 +92,12 @@ dnl command of the bourne shell.
 dnl Note that we do not use AC_PROG_RANLIB because (at least in
 dnl autoconf 2.53) this does not check for cross-compilation.
 
-AC_CHECK_TOOL(AR,ar)
-AC_CHECK_TOOL(RANLIB, ranlib)
+RTEMS_CHECK_TOOL(AR,ar)
+RTEMS_CHECK_TOOL(RANLIB, ranlib)
 
 dnl Set LD as appropriate, especially when cross-compiling
 
-AC_CHECK_TOOL(LD, ld)
+RTEMS_CHECK_TOOL(LD, ld)
 
 dnl install
 AC_PROG_INSTALL
