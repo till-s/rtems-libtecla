@@ -14,6 +14,11 @@ libtecla_r_a_SOURCES  += getline.c hash.c history.c homedir.c ioutil.c
 libtecla_r_a_SOURCES  += keytab.c pathutil.c pcache.c stringrp.c strngmem.c
 libtecla_r_a_SOURCES  += version.c
 
+libtecla_r_a_SOURCES  += chrqueue.h cplfile.h cplmatch.h direader.h errmsg.h
+libtecla_r_a_SOURCES  += expand.h freelist.h getline.h hash.h history.h
+libtecla_r_a_SOURCES  += homedir.h ioutil.h keytab.h libtecla.h pathutil.h
+libtecla_r_a_SOURCES  += stringrp.h strngmem.h
+
 libtecla_a_SOURCES     = $(libtecla_r_a_SOURCES)
 
 libtecla_a_CPPFLAGS    = $(AM_CPPFLAGS) -I@srcdir@/.. @DEFS@
@@ -37,10 +42,26 @@ man1_MANS  = $(foreach xx,$(wildcard $(srcdir)/man/prog/*.in),$(xx:%.in=%))
 
 endif
 
-include_HEADERS = $(srcdir)/libtecla.h
+EXTRA_DIST = $(wildcard $(srcdir)/man/func/*.in)
+EXTRA_DIST+= $(wildcard $(srcdir)/man/libr/*.in)
+EXTRA_DIST+= $(wildcard $(srcdir)/man/misc/*.in)
+EXTRA_DIST+= $(wildcard $(srcdir)/man/file/*.in)
+EXTRA_DIST+= $(wildcard $(srcdir)/man/prog/*.in)
 
-# enhance.c
-# demo2.c
-# demo3.c
-# demo.c
+# Also dist the prebuilt html pages; user needs man2html
+# to reconstruct those...
+EXTRA_DIST+=$(wildcard $(srcdir)/html/*.html)
+
+EXTRA_DIST+= README.rtems LICENSE.TERMS RELEASE.NOTES PORTING CHANGES
+
+EXTRA_DIST+= getline.c.opostdiff
+
+EXTRA_DIST+= enhance.c demo2.c demo3.c demo.c 
+
+# original libtecla stuff
+EXTRA_DIST+= Makefile.in.orig Makefile.rules Makefile.stub Makefile libtecla.map
+
+EXTRA_DIST+= update_version update_html
+
+include_HEADERS = $(srcdir)/libtecla.h
 
