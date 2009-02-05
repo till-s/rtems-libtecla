@@ -75,10 +75,10 @@ The supported wildcards and their meanings are:
               'chars'.  If 'chars' contains an expression of
               the form a-b, then any character between a and
               b, including a and b, matches. The '-'
-              character looses its special meaning as a
+              character loses its special meaning as a
               range specifier when it appears at the start
               of the sequence of characters. The ']'
-              character also looses its significance as the
+              character also loses its significance as the
               terminator of the range expression if it
               appears immediately after the opening '[', at
               which point it is treated one of the
