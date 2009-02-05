@@ -9,6 +9,16 @@ dnl contains the libtecla source code.
 
 AC_INIT(getline.c)
 
+dnl The following directive tells autoconf to figure out the target
+dnl system type and assign a canonical name for this to the $target
+dnl shell variable. This is used below in the target-specific case
+dnl statement.
+
+AC_CANONICAL_SYSTEM
+
+AM_INIT_AUTOMAKE(libtecla, 1.0)
+AM_MAINTAINER_MODE
+
 dnl Here we set the major version number of the tecla library.
 dnl Incrementing this number implies that a change has been made to
 dnl the library's public interface, which makes it binary incompatible
@@ -52,6 +62,7 @@ dnl for the optimization level.
 
 CFLAGS="$CFLAGS"
 AC_PROG_CC
+AC_PROG_CPP
 
 dnl Apparently not all implementations of the 'make' command define
 dnl the MAKE variable. The following directive creates a variable
@@ -81,18 +92,15 @@ dnl command of the bourne shell.
 dnl Note that we do not use AC_PROG_RANLIB because (at least in
 dnl autoconf 2.53) this does not check for cross-compilation.
 
-AC_CHECK_TOOL(RANLIB, ranlib)
+RTEMS_CHECK_TOOL(AR,ar)
+RTEMS_CHECK_TOOL(RANLIB, ranlib)
 
 dnl Set LD as appropriate, especially when cross-compiling
 
-AC_CHECK_TOOL(LD, ld)
+RTEMS_CHECK_TOOL(LD, ld)
 
-dnl The following directive tells autoconf to figure out the target
-dnl system type and assign a canonical name for this to the $target
-dnl shell variable. This is used below in the target-specific case
-dnl statement.
-
-AC_CANONICAL_SYSTEM
+dnl install
+AC_PROG_INSTALL
 
 dnl In early versions of Solaris, some libraries are in /usr/ccs/lib,
 dnl where gcc doesn't look. The tests below for the curses library
@@ -142,6 +150,14 @@ dnl USE_TERMINFO or USE_TERMCAP is arranged to be defined in CFLAGS,
 dnl via the exported DEFINES shell variable, and the library in which
 dnl they were found is appended to the LIBS shell variable.
 
+dnl termcap/terminfo is not reentrant [thanks to Eric Norum for
+dnl pointing this out].
+
+case $host_os in
+	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+AC_CHECK_HEADER(sys/termios.h, AC_DEFINE(HAVE_SYS_TERMIOS_H))
+	;;
+	*)
 AC_CHECK_LIB(curses, tigetstr, [
   AC_DEFINE(USE_TERMINFO)
   LIBS="$LIBS -lcurses"
@@ -153,6 +169,8 @@ AC_CHECK_LIB(curses, tigetstr, [
   LIBS="$LIBS -lcurses"
   AC_CHECK_HEADER(termcap.h, AC_DEFINE(HAVE_TERMCAP_H))
 ])])])
+	;;
+esac
 
 dnl Search for the curses.h and term.h header files, first in the
 dnl standard system-include directories, and then if not found there,
@@ -163,7 +181,25 @@ dnl including curses.h causes complaints, so when checking for term.h
 dnl we tell AC_CHECK_HEADERS() to include curses.h in the test file
 dnl that it attempts to compile.
 
-AC_CHECK_HEADERS(curses.h, [AC_CHECK_HEADERS(term.h,[],[],[#include <curses.h>])], [AC_CHECK_HEADERS(ncurses/curses.h, [AC_CHECK_HEADERS(ncurses/term.h,[],[],[#include <ncurses/curses.h>])])])
+case $host_os in
+*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+;;
+*)
+AC_CHECK_HEADER(term.h, AC_DEFINE(HAVE_TERM_H), [
+   AC_CHECK_HEADER(ncurses/term.h, AC_DEFINE(HAVE_NCURSES_TERM_H))
+])
+;;
+esac
+
+case $host_os in
+*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+  ;;
+  *)
+AC_CHECK_HEADER(curses.h, AC_DEFINE(HAVE_CURSES_H), [
+  AC_CHECK_HEADER(ncurses/curses.h, AC_DEFINE(HAVE_NCURSES_CURSES_H))
+])
+;;
+esac
 
 dnl The following variable lists the targets that will be created if
 dnl the user runs make without any arguments. Initially we assume
@@ -172,6 +208,8 @@ dnl of the library.
 
 AC_SUBST(TARGETS)
 TARGETS="normal reentrant"
+
+AC_SUBST(TGTLIBS,['$(foreach yy,$(foreach xx,$(TARGET_LIBS),$(addsuffix _$(xx),$(TARGETS))),$(TARGET_$(yy)))'])
 
 dnl Check for reentrant functions by attempting to compile and link a
 dnl temporary program which calls them, being sure to include the
@@ -208,7 +246,13 @@ dnl available, default to only compiling the non-reentrant version of
 dnl the library.
 
 if test $tecla_cv_reentrant = no; then
+case $host_os in
+	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
+  TARGETS="reentrant"
+	;;
+	*)
   TARGETS="normal"
+esac
 fi
 
 dnl If sys/select.h exists, arrange for the HAVE_SYS_SELECT_H C-macro to
@@ -347,6 +391,10 @@ dnl these files should have. On systems where the following defaults
 dnl are not valid, the default values should be overriden in the
 dnl target-specific case statement later in this file.
 
+dnl NOTE: when using the automake generated "Makefile.in" the
+dnl       location/extension of the manpages cannot be changed
+dnl       from here due to automake restrictions.
+
 AC_SUBST(LIBR_MANDIR)
 AC_SUBST(LIBR_MANEXT)
 LIBR_MANDIR="man3"
@@ -422,6 +470,11 @@ dnl names. Beware that autoconf uses [] as quote characters, so if you
 dnl want to use a regexp character range like [a-z], you should write
 dnl this as [[a-z]].
 
+dnl T. Straumann; don't build shared libs for the cexp demo program
+dnl               so they don't have problems with the shared library
+dnl               path
+dnl case $target in
+dnl case "ts_dont_build_shared_libs_for_cexp_demo" in
 case $target in
 *solaris*)
   AC_DEFINE(__EXTENSIONS__)
@@ -559,13 +612,16 @@ dnl Create the list of files to be generated by the configure script.
 
 OUTPUT_FILES="Makefile"
 rm -rf man/man*
-if test "$MAKE_MAN_PAGES"_ = "yes"_; then
+if test "$MAKE_MAN_PAGES"_ = "yes"_ -a "${with_multisubdir}x" == "x" ; then
   for area in libr func misc prog file; do
-    for page in man/$area/*.in; do
+    for page in "$srcdir"/man/$area/*.in; do
       OUTPUT_FILES="$OUTPUT_FILES `echo $page | sed 's/\.in$//'`"
     done
   done
 fi
+AM_CONDITIONAL(MAKE_MAN_PAGES, test "$MAKE_MAN_PAGES"_ = "yes"_ -a "${with_multisubdir}x" == "x")
+
+TILLAM_MULTISUB_INSTALLDIR
 
 dnl The following directive must always be the last line of any
 dnl autoconf script. It causes autoconf to create the configure
@@ -578,5 +634,7 @@ dnl argument. Note that only shell variables that were exported above
 dnl with the AC_SUBST() directive will be substituted in @VAR@
 dnl directives (some macros like AC_PROG_CC also call AC_SUBST for you
 dnl for the variables that they output).
+
+AC_CONFIG_FILES([Makefile])
 
 AC_OUTPUT($OUTPUT_FILES)
