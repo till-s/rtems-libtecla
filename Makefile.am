@@ -1,5 +1,6 @@
 AUTOMAKE_OPTIONS=foreign
 
+ACLOCAL_AMFLAGS=-I../m4
 
 TARGET_normal_static   = libtecla.a
 TARGET_reentrant_static= libtecla_r.a
