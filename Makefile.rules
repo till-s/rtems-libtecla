@@ -31,7 +31,7 @@ PROGS = $(DEMO_PROGS) enhance$(SUFFIX)
 static: libtecla$(SUFFIX).a
 
 libtecla$(SUFFIX).a: $(LIB_OBJECTS)
-	ar -ru $@ $(LIB_OBJECTS); \
+	$(AR) -ru $@ $(LIB_OBJECTS); \
 	$(RANLIB) $@; \
 	rm -f $(PROGS)
 
@@ -55,7 +55,7 @@ demos: $(DEMO_PROGS)
 
 demo$(SUFFIX): $(OBJDIR)/demo.o
 	LD_RUN_PATH="$(LIBDIR):$$LD_RUN_PATH:`pwd`" $(CC) $(CFLAGS) -o $@ \
- $(OBJDIR)/demo.o -L. -ltecla$(SUFFIX) $(LIBS)
+ $(OBJDIR)/demo.o -L. -ltecla$(SUFFIX) $(LIBS) -Wl,--defsym,main=tecla_main
 
 demo2$(SUFFIX): $(OBJDIR)/demo2.o
 	LD_RUN_PATH="$(LIBDIR):$$LD_RUN_PATH:`pwd`" $(CC) $(CFLAGS) -o $@ \
