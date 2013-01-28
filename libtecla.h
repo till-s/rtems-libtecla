@@ -53,6 +53,13 @@ extern "C" {
 #define TECLA_MINOR_VER 6
 #define TECLA_MICRO_VER 1
 
+/* this version of libtecla has been modified to pass nonprinting
+ * characters terminating a line (i.e. mapped to the 'newline' action)
+ * along to the user instead of mapping them to '\n').
+ * This is nice, because the user might take different action
+ * depending on what key caused the line to be accepted.
+ */
+#define LIBTECLA_ACCEPT_NONPRINTING_LINE_END
 /*.......................................................................
  * Query the version number of the tecla library.
  *
@@ -207,7 +214,7 @@ typedef struct {
  *  [chars]  -  Match any single character that appears in 'chars'.
  *              If 'chars' contains an expression of the form a-b,
  *              then any character between a and b, including a and b,
- *              matches. The '-' character looses its special meaning
+ *              matches. The '-' character loses its special meaning
  *              as a range specifier when it appears at the start
  *              of the sequence of characters.
  *  [^chars] -  The same as [chars] except that it matches any single
