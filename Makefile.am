@@ -65,7 +65,7 @@ EXTRA_DIST+= getline.c.opostdiff
 EXTRA_DIST+= enhance.c demo2.c demo3.c demo.c 
 
 # original libtecla stuff
-EXTRA_DIST+= Makefile.in.orig Makefile.rules Makefile.stub Makefile libtecla.map
+EXTRA_DIST+= Makefile.in.orig Makefile.rules Makefile.stub libtecla.map
 
 EXTRA_DIST+= update_version update_html
 
