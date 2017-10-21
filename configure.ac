@@ -7,7 +7,7 @@ dnl single argument as the name of an arbitrary file, which it uses to
 dnl ensure that it is being run correctly from the directory which
 dnl contains the libtecla source code.
 
-AC_INIT(getline.c)
+AC_INIT(libtecla, 1.0)
 
 dnl The following directive tells autoconf to figure out the target
 dnl system type and assign a canonical name for this to the $target
@@ -16,7 +16,7 @@ dnl statement.
 
 AC_CANONICAL_SYSTEM
 
-AM_INIT_AUTOMAKE(libtecla, 1.0)
+AM_INIT_AUTOMAKE([foreign 1.10])
 AM_MAINTAINER_MODE
 
 dnl Here we set the major version number of the tecla library.
@@ -157,12 +157,14 @@ AC_ARG_ENABLE([ansiterm],[whether to build w/o curses/termcap just assuming an A
 
 case $host_os in
 	*[[rR]][[tT]][[eE]][[mM]][[sS]]*)
-AC_CHECK_HEADER(sys/termios.h, AC_DEFINE(HAVE_SYS_TERMIOS_H))
 	if test "$enable_ansiterm"xxx = xxx ; then
 		enable_ansiterm=yes
 	fi
 	;;
 esac
+
+AC_CHECK_HEADER(sys/termios.h, AC_DEFINE(HAVE_SYS_TERMIOS_H))
+AC_CHECK_HEADER(termios.h,     AC_DEFINE(HAVE_TERMIOS_H))
 
 AC_MSG_NOTICE(["ansiterm is $enable_ansiterm"])
 if test ! "$enable_ansiterm"xxx = yesxxx ; then

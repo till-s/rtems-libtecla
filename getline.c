@@ -147,14 +147,15 @@ static TputsRetType gl_tputs_putchar(TputsArgType c);
  */
 #include <unistd.h>
 #include <fcntl.h>
-#ifdef __rtems__
-#ifdef HAVE_SYS_TERMIOS_H
-#include <sys/termios.h>
-#else
-#include <rtems-hackdefs.h> /* avoid pulling in BSP headers and termios is :-( */
-#endif
-#else
+
+#ifdef HAVE_TERMIOS_H
 #include <termios.h>
+#elif defined(HAVE_SYS_TERMIOS_H)
+#include <sys/termios.h>
+#elif defined(__rtems__)
+#include <rtems-hackdefs.h> /* avoid pulling in BSP headers and termios is :-( */
+#else
+#error "No termios.h header found"
 #endif
 
 /*
